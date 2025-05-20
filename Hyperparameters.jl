@@ -32,26 +32,28 @@ end
 ###########################################
 ## NEW VERSION OF HYPERPARAMETERS 
 ###########################################
-struct TotalCurrentHP <: AbstractCurrentHP
+struct TotalCurrentHP{L<:AbstractLTI} <: AbstractCurrentHP
     τ::AbstractVector
+    ltiType::Type{L}
+    trainFB::Bool
     leakCurrentHP::Union{Nothing,AbstractCurrentHP}
     ionicCurrentHP::Tuple{Vararg{AbstractCurrentHP}}
     ionicCurrentNames::Tuple{Vararg{String}}
 end
 
 # Full constructor using keyword arguments 
-function TotalCurrentHP(τ,leakCurrentHP,ionicCurrentHP::Tuple; ionicCurrentNames::Tuple)
+function TotalCurrentHP(τ,leakCurrentHP,ionicCurrentHP::Tuple; realization=OrthogonalFilterCell, trainFB=false, ionicCurrentNames::Tuple)
     if length(ionicCurrentHP) != length(ionicCurrentNames)
         error("Number of ionicCurrentHP must equal number of ionicCurrentNames")
     end
-    return TotalCurrentHP(τ,leakCurrentHP,ionicCurrentHP,ionicCurrentNames)
+    return TotalCurrentHP(τ,realization,trainFB,leakCurrentHP,ionicCurrentHP,ionicCurrentNames)
 end
 
 # Simple constructor for single ionic current and no activation function priors
-function TotalCurrentHP(τ,leakCurrentHP,ionicCurrentHP::AbstractCurrentHP)
+function TotalCurrentHP(τ,leakCurrentHP,ionicCurrentHP::AbstractCurrentHP; realization=OrthogonalFilterCell, trainFB=false)
     ionicCurrentHP = (ionicCurrentHP,)
     ionicCurrentNames = ("Intrinsic current",)
-    return TotalCurrentHP(τ,leakCurrentHP,ionicCurrentHP,ionicCurrentNames)
+    return TotalCurrentHP(τ,realization,trainFB,leakCurrentHP,ionicCurrentHP,ionicCurrentNames)
 end
 
 struct LumpedCurrentHP <: AbstractCurrentHP
@@ -112,9 +114,11 @@ function ActivationCurrentHP(xInds,xUnits,xLayerFun,xLayerTypes,g₀,E₀; σ=no
                                                                         actReadoutBias=false,
                                                                         actNormFunction=MinMaxNorm,
                                                                         actNormLims=nothing,
+                                                                        actRegWeight=1.0,
+                                                                        actOrthogonalize=false,
                                                                         regWeight=1.0)
     actMlpHP = MlpHP(length(xInds),xUnits,xLayerFun,xLayerTypes,actReadoutBias)
-    actHP = LumpedCurrentHP(xInds,actMlpHP,false,actNormFunction,nothing,actNormLims,1.0,false,1.0) 
+    actHP = LumpedCurrentHP(xInds,actMlpHP,false,actNormFunction,nothing,actNormLims,1.0,actOrthogonalize,actRegWeight) 
 
     return GatingCurrentHP(actHP,nothing,g₀,E₀,σ,trainCond,trainNernst,regNernst,maximalBias,regWeight,(true,false))
 end
@@ -127,9 +131,11 @@ function InactivationCurrentHP(xInds,xUnits,xLayerFun,xLayerTypes,g₀,E₀; σ=
                                                                         inactReadoutBias=false,
                                                                         inactNormFunction=MinMaxNorm,
                                                                         inactNormLims=nothing,
+                                                                        inactRegWeight=1.0,
+                                                                        inactOrthogonalize=false,
                                                                         regWeight=1.0)
     inactMlpHP = MlpHP(length(xInds),xUnits,xLayerFun,xLayerTypes,inactReadoutBias)
-    inactHP = LumpedCurrentHP(xInds,inactMlpHP,false,inactNormFunction,nothing,inactNormLims,1.0,false,1.0)
+    inactHP = LumpedCurrentHP(xInds,inactMlpHP,false,inactNormFunction,nothing,inactNormLims,1.0,inactOrthogonalize,inactRegWeight)
 
     return GatingCurrentHP(nothing,inactHP,g₀,E₀,σ,trainCond,trainNernst,regNernst,maximalBias,regWeight,(false,true))
 end

@@ -115,19 +115,19 @@ function (fb::AbstractLTI)(u::AbstractArray;DC=true)
     return hcat([fb(uᵢ) for uᵢ in u]...)
 end
 
-function warmUp(fb::AbstractLTI,u::AbstractArray)
+function warmUp(fb::AbstractLTI,u::AbstractArray; stopAt=nothing)
     # Warm up filter
     fb = Flux.Recur(fb,DCgain(fb)*u[1])
     _ = [fb(uᵢ) for uᵢ in u]
-    # Run filter again, after warmUp there should be no large transients
-    return hcat([fb(uᵢ) for uᵢ in u]...)
+    # Run filter again, after warming up there should be no large transients
+    return hcat([fb(uᵢ) for uᵢ in u[1:(isnothing(stopAt) ? length(u) : stopAt)]]...)
 end
 
 function Flux.trainable(fb::F) where F<:AbstractLTI
     if fb.trainable
         return (W=fb.W,)
     else
-        return ()
+        return NamedTuple()
     end
 end
 

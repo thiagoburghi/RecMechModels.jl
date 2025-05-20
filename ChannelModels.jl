@@ -44,11 +44,17 @@ function TotalCurrent(hp::TotalCurrentHP,data::Vector{D},FB::AbstractLTI,t₀::I
     return TotalCurrent(leakCurrent,ionicCurrents,ones(Float32,1,length(ionicCurrents)))
 end
 
-Flux.@layer :expand TotalCurrent trainable=(leakCurrent,ionicCurrents)
+Flux.@layer :expand TotalCurrent #trainable=(leakCurrent,ionicCurrents)
+function Flux.trainable(m::TotalCurrent{Nothing,C,R}) where {C<:NamedTuple,R<:AbstractMatrix}
+    return (ionicCurrents=m.ionicCurrents,)
+end
+function Flux.trainable(m::TotalCurrent{L,C,R}) where {L<:AbstractCurrent,C<:NamedTuple,R<:AbstractMatrix}
+    return (leakCurrent=m.leakCurrent,ionicCurrents=m.ionicCurrents)
+end
 
 function (m::TotalCurrent{Nothing,C,R})(v::M,x::M) where {C<:NamedTuple,R,M<:AbstractMatrix}
     ionic = vcat(map(f->f(v,x),Tuple(m.ionicCurrents))...)
-    return ionic
+    return m.ionicReadout * ionic
 end
 
 function (m::TotalCurrent{L,C,R})(v::M,x::M) where {L<:AbstractCurrent,C<:NamedTuple,R,M<:AbstractMatrix}
@@ -61,7 +67,11 @@ function ionicCurrents(m::TotalCurrent,v::M,x::M) where M<:AbstractMatrix
     return m.ionicReadout' .* ionic
 end
 
-function leakCurrent(m::TotalCurrent,v::AbstractMatrix)
+function leakCurrent(m::TotalCurrent{Nothing,C,R},v::AbstractMatrix) where {C<:NamedTuple,R<:AbstractMatrix}
+    return nothing
+end
+
+function leakCurrent(m::TotalCurrent{L,C,R},v::AbstractMatrix) where {L<:AbstractCurrent,C<:NamedTuple,R<:AbstractMatrix}
     return m.leakCurrent(v)
 end
 
@@ -222,18 +232,18 @@ function (m::LumpedCurrent)(V::AbstractMatrix,X::AbstractMatrix)
     return m.mlp(m.normLayer((V,X)))
 end
 
-function regularizer(m::LumpedCurrent{C,N,Float32},fun::F;skipReadout::Int=0) where {C,N,F}
+function regularizer(m::LumpedCurrent{C,N,Float32},fun::F) where {C,N,F}
     norm = 0
-    for n = 1:(length(m.mlp)-skipReadout) # skipReadout=1 avoids regularizing last layer
-        norm += fun(weight(m.mlp[n]))    
+    for n = 1:(length(m.mlp))
+        norm += fun(weight(m.mlp[n]))
     end
     return m.regWeight*norm
 end
 
-function regularizer(m::LumpedCurrent{C,N,<:Tuple},fun::F;skipReadout::Int=0) where {C,N,F}
+function regularizer(m::LumpedCurrent{C,N,<:Tuple},fun::F) where {C,N,F}
     norm = 0
-    for n = 1:(length(m.mlp)-skipReadout) # skipReadout=1 avoids regularizing last layer
-        norm += m.regWeight[n]*fun(weight(m.mlp[n]))    
+    for n = 1:(length(m.mlp))
+        norm += m.regWeight[n]*fun(weight(m.mlp[n]))
     end
     return norm
 end
@@ -350,43 +360,43 @@ function regularizer(m::GatingCurrent{Nothing,Nothing,R,ConstantScaling},fun::F)
 end
 
 function regularizer(m::GatingCurrent{A,Nothing,R,<:SignDefinite},fun::F) where {A<:LumpedCurrent,R,F}
-    norm = regularizer(m.actLayer,fun;skipReadout=1)
+    norm = regularizer(m.actLayer,fun)
     norm += regularizer(m.reversalLayer,fun)
     norm += fun(weight(m.maximalLayer))
     return m.regWeight*norm
 end
 
 function regularizer(m::GatingCurrent{A,Nothing,R,ConstantScaling},fun::F) where {A<:LumpedCurrent,R,F}
-    norm = regularizer(m.actLayer,fun;skipReadout=1)
+    norm = regularizer(m.actLayer,fun)
     norm += regularizer(m.reversalLayer,fun)
     return m.regWeight*norm
 end
 
 function regularizer(m::GatingCurrent{A,I,R,<:SignDefinite},fun::F) where {A<:LumpedCurrent,I<:LumpedCurrent,R,F}
-    norm = regularizer(m.actLayer,fun;skipReadout=1)
-    norm += regularizer(m.inactLayer,fun;skipReadout=1)
+    norm = regularizer(m.actLayer,fun)
+    norm += regularizer(m.inactLayer,fun)
     norm += regularizer(m.reversalLayer,fun)
     norm += fun(weight(m.maximalLayer))
     return m.regWeight*norm
 end
 
 function regularizer(m::GatingCurrent{A,I,R,ConstantScaling},fun::F) where {A<:LumpedCurrent,I<:LumpedCurrent,R,F}
-    norm = regularizer(m.actLayer,fun;skipReadout=1)
-    norm += regularizer(m.inactLayer,fun;skipReadout=1)
+    norm = regularizer(m.actLayer,fun)
+    norm += regularizer(m.inactLayer,fun)
     norm += regularizer(m.reversalLayer,fun)
     return m.regWeight*norm
 end
 
 function regularizer(m::GatingCurrent{A,I,Nothing,<:SignDefinite},fun::F) where {A<:LumpedCurrent,I<:LumpedCurrent,F}
-    norm = regularizer(m.actLayer,fun;skipReadout=1)
-    norm += regularizer(m.inactLayer,fun;skipReadout=1)
+    norm = regularizer(m.actLayer,fun)
+    norm += regularizer(m.inactLayer,fun)
     norm += fun(weight(m.maximalLayer))
     return m.regWeight*norm
 end
 
 function regularizer(m::GatingCurrent{A,I,Nothing,ConstantScaling},fun::F) where {A<:LumpedCurrent,I<:LumpedCurrent,F}
-    norm = regularizer(m.actLayer,fun;skipReadout=1)
-    norm += regularizer(m.inactLayer,fun;skipReadout=1)
+    norm = regularizer(m.actLayer,fun)
+    norm += regularizer(m.inactLayer,fun)
     return m.regWeight*norm
 end
 

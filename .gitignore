@@ -1,9 +1,4 @@
 .vscode/
 backup/
-
-examples/HH/data
-examples/LP-PD/data/
-examples/HH/results
-examples/LP-PD/results
-
-output.log
+examples/HCO/data
+examples/HCO/results

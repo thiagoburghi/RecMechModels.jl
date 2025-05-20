@@ -118,12 +118,13 @@ function filter_data(m,n,datapath,dt,ωc,order)
         ini = 5*settling_index
 
         for i = 1:n
-            V = filt(bwfilter, data_v[i])[ini:end]
+            V = filtfilt(bwfilter, data_v[i])[ini:end-ini]
             data[string("V",i)] = V
         end
 
         for i = 1:m
-            I =  filt(bwfilter, data_iapp[i])[ini:end] # data_iapp[i][ini:end] # 
+            # I =  filtfilt(bwfilter, data_iapp[i])[ini:end-ini]
+            I = data_iapp[i][ini:end-ini]
             data[string("I",i)] = I
         end
 

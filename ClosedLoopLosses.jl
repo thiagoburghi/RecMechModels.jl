@@ -2,7 +2,7 @@ function Flux.gpu(data::Vector{D}) where D<:AbstractData
     return [gpu(d) for d in data]
 end
 
-function (l::AbstractLoss)(net::N,data::Union{B,Vector{D}}) where {N<:Network,B<:RNNBatches,D<:AbstractData}
+function (l::AbstractLoss)(net::N,data::Union{B,Vector{D}}) where {N<:Network,B<:MiniBatches,D<:AbstractData}
     loss = 0
     for d in data
         loss += l(net,d)

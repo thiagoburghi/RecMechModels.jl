@@ -17,21 +17,44 @@ function train_ANN(loss, net::Network, trainData, valdata, opt, xpu; epochs=1000
     net = xpu(net)
     loss = xpu(loss)
     
-    # Initialize an array to hold the last 10 models                # New Flux' way of training:
+    # Initialize an array to hold the last models                
     model_snapshots = []
     cl_log_counter = 1
     cumtime = 0
-    θ = Flux.params(net)                                            # opt_state = Flux.setup(opt,net)
+    
+    # For old Flux training syntax:
+    # θ = Flux.params(net)
+    
+    # For new Flux training syntax:
+    opt_state = Flux.setup(opt,net)
+    # Flux.adjust!(opt_state.cell.Cinv, 0.1)
+    # Flux.adjust!(opt_state.cell.Cinv, beta=(0.8,0.9))
+    # Flux.adjust!(opt_state.cell.ANN[1,1][:leakCurrent], 0.1)
+    # Flux.adjust!(opt_state.cell.ANN[1,1][:leakCurrent], beta=(0.8,0.9))
+
     for i = 1:epochs
         total_loss = 0
         epoch_time = @elapsed for d in trainData
-            gs = gradient(θ) do                                     # gs = Flux.gradient(net) do net
-                minibatch_loss = loss(d...,net.cell)
-                minibatch_loss += regularize(loss,net.cell)
+            # Old Flux training syntax:
+            # gs = gradient(θ) do
+            #     minibatch_loss = loss(d...,net.cell)
+            #     minibatch_loss += regularize(loss,net.cell)
+            #     return minibatch_loss
+            # end
+
+            # New Flux training syntax:
+            gs = Flux.gradient(net) do m
+                minibatch_loss = loss(d...,m.cell)
+                minibatch_loss += regularize(loss,m.cell)
                 return minibatch_loss
             end
             total_loss += minibatch_loss
-            Flux.update!(opt, θ, gs)                                # Flux.update!(opt_state, net, gs[1])
+
+            # Old Flux training syntax:
+            # Flux.update!(opt, θ, gs)
+
+            # New Flux training syntax:
+            Flux.update!(opt_state, net, gs[1])
         end
         cumtime += epoch_time
         train_loss[i] = total_loss/length(trainData)
@@ -61,16 +84,20 @@ end
 """
     Closed-loop fitting
 """
-function trainEpoch!(net::N,lossFun::L,trainData::D,opt::O,θ::P) where {N<:Network,L<:AbstractLoss,D<:AbstractData,O<:Flux.Optimise.AbstractOptimiser,P<:Flux.Params}
+function trainEpoch!(net::N,lossFun::L,trainData::D,opt::O,θ::P; slow_ic=10) where {N<:Network,L<:AbstractLoss,D<:AbstractData,O<:Flux.Optimise.AbstractOptimiser,P<:Flux.Params}
     loss = 0
     gs = gradient(θ) do
         loss = lossFun(net,trainData)
     end
-    Flux.update!(opt, θ, gs)
+    # Flux.update!(opt, θ, gs)
+    Flux.update!(opt, Flux.params(net), gs)
+    opt.eta = opt.eta/slow_ic
+    Flux.update!(opt, Flux.params(trainData), gs)
+    opt.eta = opt.eta*slow_ic
     return loss
 end
 
-function trainEpoch!(net::N,lossFun::L,trainData::RNNBatches,opt::O,θ::P) where {N<:Network,L<:AbstractLoss,O<:Flux.Optimise.AbstractOptimiser,P<:Flux.Params}
+function trainEpoch!(net::N,lossFun::L,trainData::MiniBatches,opt::O,θ::P; slow_ic=10) where {N<:Network,L<:AbstractLoss,O<:Flux.Optimise.AbstractOptimiser,P<:Flux.Params}
     local minibatch_loss
     total_loss = 0
     for d in trainData
@@ -79,12 +106,16 @@ function trainEpoch!(net::N,lossFun::L,trainData::RNNBatches,opt::O,θ::P) where
             return minibatch_loss
         end
         total_loss += minibatch_loss
-        Flux.update!(opt, θ, gs)
+        # Flux.update!(opt, θ, gs)
+        Flux.update!(opt, Flux.params(net), gs)
+        opt.eta = opt.eta/slow_ic
+        Flux.update!(opt, Flux.params(trainData), gs)
+        opt.eta = opt.eta*slow_ic
     end
     return total_loss/length(trainData)
 end
 
-function train(net::N,lossFun::L,trainData::D,opt; xpu=gpu, epochs=100, snapshots_interval = 10, print_interval=100, opt_schedule::Union{Nothing,Vector}=nothing, teacher_schedule::Union{Nothing,Vector}=nothing) where {N<:Network,L<:AbstractLoss,D<:AbstractData}
+function train(net::N,lossFun::L,trainData::D,opt; xpu=gpu, epochs=100, snapshots_interval = 10, data_snapshots=false, print_interval=100, slow_ic=10, opt_schedule::Union{Nothing,Tuple}=nothing, teacher_schedule::Union{Nothing,Vector}=nothing) where {N<:Network,L<:AbstractLoss,D<:AbstractData}
     cumtime = 0
     train_loss = zeros(epochs)
     train_time = zeros(epochs)
@@ -98,7 +129,7 @@ function train(net::N,lossFun::L,trainData::D,opt; xpu=gpu, epochs=100, snapshot
     # Keep the first model for comparison
     initial_loss = lossFun(net,trainData)
     println("Epoch ", 0, ": training loss = ", initial_loss)
-    push!(model_snapshots, (model=cpu(deepcopy(net)), epoch=0, loss=initial_loss, time=0.0))
+    push!(model_snapshots, (model=cpu(deepcopy(net)), epoch=0, loss=initial_loss, time=0.0, data=(data_snapshots ? deepcopy(cpu(trainData)) : nothing)))
 
     for i = 1:epochs
         # Teacher forcing schedule
@@ -119,11 +150,9 @@ function train(net::N,lossFun::L,trainData::D,opt; xpu=gpu, epochs=100, snapshot
         end
         # Optimizer schedule
         if !isnothing(opt_schedule)
-            epoch = opt_schedule[opt_counter][1]
-            if i == epoch
-                η = opt_schedule[opt_counter][2]
-                println("Changing η to ",η,", scheduled element: ",opt_counter)
-                opt.eta = η
+            if i == opt_schedule[opt_counter][:epoch]
+                println("Changing η from ",opt.eta," to ",opt_schedule[opt_counter][:η])
+                opt.eta = opt_schedule[opt_counter][:η]
                 if opt_counter == length(opt_schedule)
                     println("End of optimizer schedule.")
                     opt_schedule = nothing
@@ -134,7 +163,7 @@ function train(net::N,lossFun::L,trainData::D,opt; xpu=gpu, epochs=100, snapshot
         end
         # Train one epoch
         epoch_time = @elapsed begin
-            train_loss[i] = trainEpoch!(net,lossFun,trainData,opt,θ)
+            train_loss[i] = trainEpoch!(net,lossFun,trainData,opt,θ; slow_ic=slow_ic)
         end
         cumtime += epoch_time
         train_time[i] = cumtime
@@ -151,106 +180,8 @@ function train(net::N,lossFun::L,trainData::D,opt; xpu=gpu, epochs=100, snapshot
             # Reduce model size for saving
             model.V = map(v->v[:,1:1],model.V)
             model.X = map(X->map(x->x[:,1:1],X),model.X)
-            push!(model_snapshots, (model=model, epoch=i, loss=train_loss[i], time=train_time[i]))
+            push!(model_snapshots, (model=model, epoch=i, loss=train_loss[i], time=train_time[i],data=(data_snapshots ? deepcopy(cpu(trainData)) : nothing)))
         end
     end
     return (net=cpu(net),data=cpu(trainData),time=train_time,loss=train_loss,snapshots=model_snapshots)
 end
-
-##
-# function schedule_matrix(k,batch_size; option = "exponential", p₀ = 1, p_end = 0.6, α=1.0, β=0.1,rng = Random.GLOBAL_RNG)   # α∈[0,1]
-#     # k is the number of times we have used the prediction as input
-#     if option == "exponential"
-#         p = max(p₀^k,p_end)
-#     elseif  option == "linear"
-#         decay_rate = 0.002
-#         p = max(p₀ - decay_rate * k, p_end)
-#     # elseif option == "inv_sig"
-#     #     p = p₀*1/(1+exp(β*(k-100)))
-#     end
-
-#     distrib = Bernoulli(p)
-#     vector = 1 .- α.*(1 .- rand(rng, distrib,1,batch_size))
-#     # println("Schedule probability: ", p)
-#     return vector
-# end
-
-# be careful! use same batchsize in all batches!
-# function train_comb(loss, net::Network, ind_train::AbstractVector{Int}, trainData, opt, xpu; recursive=false, schedule_option = "linear", p₀=1.0, p_end=0.6, α=1.0, K=1, Ind=100, epochs=100,olvaldata=false, rng=Random.GLOBAL_RNG)
-#     local minibatch_loss
-#     local total_length
-#     etime = zeros(epochs,maximum(ind_train))
-#     train_loss = zeros(epochs,maximum(ind_train))
-#     olvalloss = zeros(epochs,maximum(ind_train))
-
-#     net = xpu(net)
-#     loss = xpu(loss)
-#     traindata₀ = deepcopy(trainData)
-
-#     for n in ind_train
-#         θ = Flux.params(net.cell.ANN[n])
-#         data = traindata₀[n].data
-#         k = 1
-#         for i = 1:epochs
-#             total_loss = 0
-#             total_length = 0
-            
-#             # Replace inputs by predictions
-#             if i == (k-1)*K+Ind 
-#                 println("Updating inputs , index: ",i)
-#                 if recursive 
-#                     data = deepcopy(trainData[n].data)
-#                 end
-#                 V̄ = data[1][1][2]
-#                 V̂ = trainData[n].data[1][1][2]                         # get reference to do in-place
-#                 ann_input = data[1]                   
-#                 V̂ .= V̄ .+ net.cell.dt*net.cell.ANN[n](ann_input)    # Predicted V₊
-#                 V̂ .= hcat(V̄[:,1:1],V̂[:,1:end-1])                    # Predicted V
-#                 M = xpu(schedule_matrix(k,size(V̄,2);option = schedule_option, p₀ = p₀, p_end = p_end, α=α,rng = rng))          
-#                 V̂ .= M.* V̄ .+ (1 .- M).*V̂                           # Mixed V
-#                 for m=1:net.cell.size[2]
-#                     V̄ = data[1][2][m][1]
-#                     X̄ = data[1][2][m][2]
-#                     X̂ = trainData[n].data[1][2][m][2]
-#                     X̂[:,:],_ = net.cell.FB[n,m](X̄,V̄)                # Predicted X₊ (use traindata₀ or trainData ??)
-#                     X̂ .= hcat(X̄[:,1:1],X̂[:,1:end-1])                # Predicted X
-#                     X̂ .= M.*X̄ + (1 .- M).*X̂                         # Mixed X
-#                     if n==m
-#                         trainData[n].data[1][2][m][1] .= V̂          # Mixed V (TO DO: MOVE NEURON LOOP INSIDE)
-#                     end
-#                 end
-#                 trainData[n].data[2] .=  traindata₀[n].data[2] + (traindata₀[n].data[1][1][2]-V̂)/net.cell.dt
-#                 println("residual: ",norm(trainData[n].data[1][1][2]-traindata₀[n].data[1][1][2]))
-#                 k += 1 
-#             end
-
-#             etime[i,n] = @elapsed for d in trainData[n]
-#                 gs = gradient(θ) do
-#                     minibatch_loss = loss(d...,net.cell.ANN[n])
-#                     return minibatch_loss
-#                 end
-#                 batchsize = length(d[2])
-#                 total_loss += minibatch_loss
-#                 total_length += batchsize
-#                 Flux.update!(opt, θ, gs)    
-#             end
-#             train_loss[i,n] = total_loss/total_length
-#             println("Epoch ", i, ": open-loop loss = ", train_loss[i,n])
-
-#             # Open-loop validation loss
-#             if (olvaldata != false)
-#                 total_loss = 0
-#                 total_length = 0
-#                 for d in olvaldata[n]
-#                     total_loss += loss(d...,net.cell.ANN[n])
-#                     total_length += length(d[2])
-#                 end
-#                 olvalloss[i,n] = total_loss/total_length
-#             end
-#         end
-#     end
-
-#     println("Total training time: ",floor(Int,sum(etime)/60),"m ",floor(Int,rem(sum(etime),60)),"s ")
-
-#     return cpu(net),etime,train_loss,olvalloss
-# end

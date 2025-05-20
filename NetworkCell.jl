@@ -42,12 +42,12 @@ function Flux.trainable(net::NetworkCell)
 end
 
 # Constructor
-function NetworkCell(annHP::Matrix{TotalCurrentHP},ltiType::Type{L}, data::Vector{D}, dt ; γ=0.0, dumpTransientPercent=0.01, trainTeacher=false, trainFB=false, rng=Random.GLOBAL_RNG) where {L<:AbstractLTI,D<:IOData}
+function NetworkCell(annHP::Matrix{TotalCurrentHP}, data::Vector{D}, dt ; γ=0.0, dumpTransientPercent=0.01, trainTeacher=false, rng=Random.GLOBAL_RNG) where {D<:IOData}
     m,n = size(annHP)
     # Initialize inverse capacitances
     Cinv = Tuple([Nonnegative(rng,1) for i=1:m])
     # Initialize filter banks
-    FB = Tuple([Tuple([ltiType(annHP[i,j].τ,dt,trainable=trainFB) for j=1:n]) for i=1:m])
+    FB = Tuple([Tuple([annHP[i,j].ltiType(annHP[i,j].τ,dt,trainable=annHP[i,j].trainFB) for j=1:n]) for i=1:m])
     t₀ = getInitTimeIndex(FB,data,dumpTransientPercent)
     # Initialize ANNs
     ANN = Tuple([Tuple([TotalCurrent(annHP[i,j],[TCData(d,i,j) for d in data],FB[i,j],t₀,rng) for j=1:n]) for i=1:m])
@@ -56,8 +56,14 @@ function NetworkCell(annHP::Matrix{TotalCurrentHP},ltiType::Type{L}, data::Vecto
     return NetworkCell(Cinv,ANN,FB,γ,Float32(dt),(m,n),Float32(dumpTransientPercent),trainTeacher)
 end
 
+function convertTrainableLTI(net::NetworkCell;κ=0.1)
+    FB = Tuple((Tuple(TrainableOrthogonalFilterCell(getTimeConstants(net.FB[i,j]),net.FB[i,j].dt;κ=κ) for j=1:net.size[2]) for i=1:net.size[1]))
+    return NetworkCell(net.Cinv,net.ANN,FB,net.γ,net.dt,net.size,net.transientPercent,net.trainTeacher)
+end
+
 function regularizer(net::NetworkCell,fun::F) where F
     norm = sum(regularizer(net.ANN[i,j],fun) for i=1:net.size[1], j=1:net.size[2])
+    # norm += sum(l2norm(weight(net.Cinv[i])) for i=1:net.size[1])
     return norm
 end
 
@@ -142,7 +148,7 @@ function transferFunction(net::NetworkCell,Ω::AbstractArray)
 end
 
 function localAdmittances(net::NetworkCell,V̄::AbstractVecOrMat,Ω::AbstractVecOrMat)
-    V̄ = reshape(V̄,1,length(V̄))
+    V̄ = Float32.(reshape(V̄,1,length(V̄)))
     X̄ = [DCgain(net.FB[i,j]).*V̄ for i=1:net.size[1], j=1:net.size[2]]
     Hjω = [[transferFunction(net.FB[i,j],Ω[k],net.dt) for i = 1:net.size[1], j = 1:net.size[2]] for k=1:length(Ω)]
     ∂ψ = [[Flux.jacobian((v̄,x̄) -> ionicCurrents(net.ANN[i,j],v̄,x̄), [V̄[k];;], reshape(X̄[i,j][:,k],length(X̄[i,j][:,k]),1)) for i=1:net.size[1], j=1:net.size[2]] for k=1:length(V̄)]
