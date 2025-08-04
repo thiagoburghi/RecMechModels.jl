@@ -17,21 +17,44 @@ function train_ANN(loss, net::Network, trainData, valdata, opt, xpu; epochs=1000
     net = xpu(net)
     loss = xpu(loss)
     
-    # Initialize an array to hold the last 10 models                # New Flux' way of training:
+    # Initialize an array to hold the last models                
     model_snapshots = []
     cl_log_counter = 1
     cumtime = 0
-    θ = Flux.params(net)                                            # opt_state = Flux.setup(opt,net)
+    
+    # For old Flux training syntax:
+    # θ = Flux.params(net)
+    
+    # For new Flux training syntax:
+    opt_state = Flux.setup(opt,net)
+    # Flux.adjust!(opt_state.cell.Cinv, 0.1)
+    # Flux.adjust!(opt_state.cell.Cinv, beta=(0.8,0.9))
+    # Flux.adjust!(opt_state.cell.ANN[1,1][:leakCurrent], 0.1)
+    # Flux.adjust!(opt_state.cell.ANN[1,1][:leakCurrent], beta=(0.8,0.9))
+
     for i = 1:epochs
         total_loss = 0
         epoch_time = @elapsed for d in trainData
-            gs = gradient(θ) do                                     # gs = Flux.gradient(net) do net
-                minibatch_loss = loss(d...,net.cell)
-                minibatch_loss += regularize(loss,net.cell)
+            # Old Flux training syntax:
+            # gs = gradient(θ) do
+            #     minibatch_loss = loss(d...,net.cell)
+            #     minibatch_loss += regularize(loss,net.cell)
+            #     return minibatch_loss
+            # end
+
+            # New Flux training syntax:
+            gs = Flux.gradient(net) do m
+                minibatch_loss = loss(d...,m.cell)
+                minibatch_loss += regularize(loss,m.cell)
                 return minibatch_loss
             end
             total_loss += minibatch_loss
-            Flux.update!(opt, θ, gs)                                # Flux.update!(opt_state, net, gs[1])
+
+            # Old Flux training syntax:
+            # Flux.update!(opt, θ, gs)
+
+            # New Flux training syntax:
+            Flux.update!(opt_state, net, gs[1])
         end
         cumtime += epoch_time
         train_loss[i] = total_loss/length(trainData)
@@ -70,7 +93,7 @@ function trainEpoch!(net::N,lossFun::L,trainData::D,opt::O,θ::P) where {N<:Netw
     return loss
 end
 
-function trainEpoch!(net::N,lossFun::L,trainData::RNNBatches,opt::O,θ::P) where {N<:Network,L<:AbstractLoss,O<:Flux.Optimise.AbstractOptimiser,P<:Flux.Params}
+function trainEpoch!(net::N,lossFun::L,trainData::MiniBatches,opt::O,θ::P) where {N<:Network,L<:AbstractLoss,O<:Flux.Optimise.AbstractOptimiser,P<:Flux.Params}
     local minibatch_loss
     total_loss = 0
     for d in trainData

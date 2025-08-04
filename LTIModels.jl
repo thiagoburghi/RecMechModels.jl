@@ -127,7 +127,7 @@ function Flux.trainable(fb::F) where F<:AbstractLTI
     if fb.trainable
         return (W=fb.W,)
     else
-        return ()
+        return NamedTuple()
     end
 end
 

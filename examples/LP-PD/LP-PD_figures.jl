@@ -7,6 +7,10 @@ figurepath = string("examples/LP-PD/results/figures/")
 @load string(modelpath,"valTF.bson") dict_tf
 @load string(modelpath,"valMS.bson") dict_ms
 
+colorDict = Dict("file1" => palette(:default)[1],
+                 "file2" => palette(:default)[2],
+                 "file3" => palette(:default)[3])
+
 # Hyperparameters of the model
 dt=0.1
 epochs_tf = 500
@@ -26,7 +30,7 @@ net_tf = dict_tf[(filename=filename,ρ₀=ρ₀_tf,β₁=β₁_tf,β₂=β₂_tf
 _,valdata_all = loaddata(1,2,string(datapath,filename,".mat"), propTrainEnd=0.9, propVal=0.1,dt)
 data=valdata_all[1]
 
-## Simulate the model and recover synaptic current
+# Simulate the model and recover synaptic current
 t,V̂,X̂,V,Iapp = net_tf(data)
 Isyn = net_tf[1,2](V̂[1],X̂[1,2])
 
@@ -38,7 +42,7 @@ Iapp = Iapp[1][inds]
 t = t[inds]/1000
 Isyn = Isyn[inds] .- minimum(Isyn[inds])
 
-## Plot the results
+# Plot the results
 vmax,vmin = maximum(V_LP)+1,minimum(V_LP)-1
 v̂max,v̂min = maximum(V̂_LP)+1,minimum(V̂_LP)-1
 plt1 = plot(t,V_PD, 
@@ -58,13 +62,13 @@ plt3 = plot(t,V_LP,
     ylabel=string(L"v_{\mathrm{LP}}", " (target)"),
     color=:black)
 plt4 = plot(t,V̂_LP, 
-    color=palette(:default)[1],
+    color=colorDict[filename],
     xticks=(7:11, []) , 
     ylims=(v̂min,v̂max),
     yticks=([-40,-30],["-40mv","-30mv"]),
     ylabel=string(L"v_{\mathrm{LP}}", " (pred.)"))
 plt5 = plot(t,Isyn,
-    color=palette(:default)[1], 
+    color=colorDict[filename],
     xticks=(7:11, ["0s","1s","2s","3s"]),
     yticks=([0.0,1.0],["0.0nA","1.0nA"]),
     # ylims=(-0.1,1.2) ,
@@ -79,13 +83,13 @@ plt_val = plot(plt1,plt2,plt3,plt4,plt5,
     linewidth=2.0,
     size=(1000,1200))
 plot!(plt_val, 
-    ytickfontsize=12,
+    ytickfontsize=16,
     xtickfontsize=16, 
     ylabelfontsize=20,
     left_margin=10Plots.mm,)
 
-##
-savefig(plt_val,string(figurepath,string("traces_LP-PD_",filename,".png")))
+#
+savefig(plt_val,string(figurepath,string("traces_LP-PD_",filename,".svg")))
 plt_val
 
 ####################################################
@@ -102,10 +106,11 @@ bestHP,plts_tf = plotValLosses(dict_tf_filenumber,lossType="Teacher forcing ",
                             hpName="Trial: ",
                             metric=:ValLoss,                # alternatively, :AngSep
                             plotBest=false,
-                            deltaEpochIndex=20,
+                            deltaEpochIndex=25,
                             initEpochIndex=10,
                             opacityAfterFirst=0.6,
-                            linewidth=3.0)
+                            linewidth=3.0,
+                            timeMode=:s)
 
 ## Plot TF vs MS validation curves
 filename = "file1"
@@ -146,14 +151,14 @@ plt_ms = plot!(val_ms[:epochs] .+ val_tf[:epochs][val_tf[:minValLossInd]],log10.
 plt_loss_LP = plot(plts_tf...,plt_ms,layout=(length(plts_tf)+1,1),
                     size=(1000,900),
                     rightmargin=10Plots.mm,
-                    ylabelfontsize=14,
+                    ylabelfontsize=16,
                     xtickfontsize=14,
                     legendfontsize=14,
                     ytickfontsize=14)
 display(plt_loss_LP)
 
 ## Save the plots
-savefig(plt_loss_LP,string(figurepath,"losses_LP-PD.png"))
+savefig(plt_loss_LP,string(figurepath,"losses_LP-PD.svg"))
 
 ###############################################
 ## FIGURE 3 D
@@ -187,4 +192,4 @@ plt_comparison = plot(plt_tf,plt_ms,
     bottom_margin=[-15Plots.mm 0Plots.mm])
 
 ## Save the plots
-savefig(plt_comparison,string(figurepath,"traces_LP-PD_TFvsMS.png"))
+savefig(plt_comparison,string(figurepath,"traces_LP-PD_TFvsMS.svg"))

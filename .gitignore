@@ -1,6 +1,7 @@
 .vscode/
 backup/
 
+examples/HCO/
 examples/HH/data
 examples/LP-PD/data/
 examples/HH/results

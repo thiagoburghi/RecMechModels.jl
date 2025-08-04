@@ -48,7 +48,7 @@ function Flux.trainable(r::Reversal)
     if r.trainable
         return (E=r.E,)
     else
-        return ()
+        return NamedTuple()
     end
 end
 
@@ -72,7 +72,7 @@ weight(m::Threshold) = m.weight #Flux.softplus(m.weight)
 
 Flux.@layer :expand Threshold
 function Flux.trainable(m::Threshold)
-    return m.trainable ? (weight=m.weight,b=m.b) : ()
+    return m.trainable ? (weight=m.weight,b=m.b) : NamedTuple()
 end
 
 """
@@ -110,7 +110,7 @@ function Flux.trainable(m::Nonnegative)
             return (weight=m.weight,)
         end
     else
-        return ()
+        return NamedTuple()
     end
 end
 

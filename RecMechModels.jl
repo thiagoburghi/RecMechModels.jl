@@ -6,6 +6,9 @@ CUDA.allowscalar(false)
 l2norm(x) = sum(abs2, x)                                # For L2 regularization
 l1norm(x) = sum(abs, x)                                 # For L1 regularization
 
+default(fontfamily="Computer Modern",framestyle=:grid,linewidth=2,xguidefontsize=12,tickfontsize=12,legendfontsize=12,)
+# scalefontsizes(1.3)
+
 include("./DataTypes.jl")
 include("./DataUtilities.jl")
 include("./Hyperparameters.jl")

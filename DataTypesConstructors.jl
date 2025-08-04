@@ -59,28 +59,21 @@ function setup_ANNData(data::ANNData, xpu; batchsize = Inf, shuffle=true, partia
     # Use dataloader to create minibatches
     batchsize > length(data.V[1]) ? batchsize = length(data.V[1]) : nothing
     annData = Flux.DataLoader((input,output); batchsize=batchsize, shuffle=shuffle, partial=partial, rng=rng)
+
+    #Flux's DataLoader shuffles all samples in the dataset. The MiniBatches object below shuffles fixed mini-batches.
+    if !shuffle
+        batches = [d for d in annData]
+        annData = MiniBatches(batches,rng=rng)
+    end
+
     return annData
 end
 
 # Takes input-output dataset wrt neuron and organizes data for training the ANN
-function setup_ANNData(netcell::NetworkCell, iodata::D, xpu; σ=0.0, batchsize = Inf, shuffle=true, partial=false, rng=Random.GLOBAL_RNG) where D<:Union{IOData,Vector}
+function setup_ANNData(netcell::NetworkCell, iodata::D, xpu; batchsize = Inf, shuffle=true, partial=false, rng=Random.GLOBAL_RNG) where D<:Union{IOData,Vector}
     # Create non-batched data
     data = ANNData(netcell.FB,iodata,netcell.transientPercent)
-    if σ>0.0
-        data = addNoise(data,σ,rng)
-    end
     return setup_ANNData(data,xpu,batchsize=batchsize,shuffle=shuffle,partial=partial,rng=rng)
-end
-
-# Adds noise to the data so that the SNR is σ
-function addNoise(data::ANNData,σ::AbstractFloat,rng=Random.GLOBAL_RNG)
-    σ=Float32(σ)
-    X = [X+σ*std(X,dims=2).*randn(rng,Float32,size(X)) for X in data.X]
-    # V = [V+σ*std(V,dims=2).*randn(rng,Float32,size(V)) for V in data.V]
-    # I = [(eltype(I)==Nothing ? I : I+σ*std(I,dims=2).*randn(rng,Float32,size(I))) for I in data.I]
-    # T = eltype(data.T)==Nothing ? T : data.T+σ*std(data.T,dims=2).*randn(rng,Float32,size(data.T))
-    # return ANNData(V,X,I,T,data.dV)
-    return ANNData(data.V,X,data.I,data.T,data.dV)
 end
 
 """
@@ -193,7 +186,7 @@ end
 """ 
 function MSBatches(net::N,data::Vector{D}; dumpTransients=true, train_ic = true, shotsize = Inf, rng=Random.GLOBAL_RNG) where {N<:Network,D<:IOData}
     batches = [MSData(net,data[i],dumpTransients=dumpTransients, train_ic = train_ic, shotsize = shotsize) for i=1:length(data)]
-    return RNNBatches(batches,[i for i=1:length(batches)],length(batches),rng)
+    return MiniBatches(batches,[i for i=1:length(batches)],length(batches),rng)
 end
 
 """
@@ -204,7 +197,7 @@ function MSMiniBatches(net::N,data::Vector{D}; shotsPerBatch::Int, shotsize = 10
     trialData = [MSData(net,data[i],dumpTransients=dumpTransients, train_ic =train_ic, shotsize=shotsize) for i=1:length(data)]
     trialMiniBatches = [MSMiniBatches(trialData[i],shotsPerBatch=shotsPerBatch,partial=partial,rng=rng) for i=1:length(trialData)]
     allMiniBatches = vcat([trialMiniBatches[i].batches for i=1:length(trialMiniBatches)]...)
-    return RNNBatches(allMiniBatches,rng=rng)
+    return MiniBatches(allMiniBatches,rng=rng)
 end
 
 """
@@ -254,7 +247,7 @@ function MSMiniBatches(d::MSData;shotsPerBatch::Int,partial::Bool=true,rng=Rando
             batch = MSData(Vseq,Useq,Iseq,Tseq,V₀,X₀,d.shotsize,(nshots,),(rawdata,),d.train_ic,d.dt,d.samplingFactor)
             push!(batches,batch)
         end
-        return RNNBatches(batches,[i for i=1:length(batches)],length(batches),rng)
+        return MiniBatches(batches,[i for i=1:length(batches)],length(batches),rng)
     end
 end
 
@@ -310,7 +303,7 @@ function SSBatches(d::SSData, batchsize::Int; rng=Random.GLOBAL_RNG)
 
     batches = [SSData(Vseq[s],Xseq[s],Useq[s],Iseq[s],Tseq[s],batchsize) for s=1:nbatches]
 
-    return RNNBatches(batches,[i for i=1:nbatches],nbatches,rng)
+    return MiniBatches(batches,[i for i=1:nbatches],nbatches,rng)
 end
 
 # Downsamples the MSData with a new batchsize that is a multiple of the previous batchsize: (new batch size) = (old batch size)*mult

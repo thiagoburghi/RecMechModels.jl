@@ -174,31 +174,31 @@ function Flux.trainable(d::MSData)
     if d.train_ic
         return (V₀=d.V₀,X₀=d.X₀)
     else
-        return ()
+        return NamedTuple()
     end
 end
 
 Flux.@layer :expand MSData
 
 """ 
-    Type used to train the RNN with mini-batches
+    Type used to train the model with mini-batches
 """
-struct RNNBatches{D<:AbstractData,R<:AbstractRNG} <: AbstractData
-    batches::Vector{D}
+struct MiniBatches{T,R<:Union{AbstractRNG,Nothing}} <: AbstractData
+    batches::Vector{T}
     indices::Vector{Int}
     length::Int
     rng::R
 end
 
-function RNNBatches(batches::Vector{D}; rng=Random.GLOBAL_RNG) where {D<:AbstractData}
-    RNNBatches(batches,[i for i=1:length(batches)],length(batches),rng)
+function MiniBatches(batches::Vector{T}; rng=Random.GLOBAL_RNG) where T
+    MiniBatches(batches,[i for i=1:length(batches)],length(batches),rng)
 end
 
-function Base.length(d::RNNBatches)
+function Base.length(d::MiniBatches)
     return length(d.batches)
 end
 
-function Base.iterate(d::RNNBatches, state=1)
+function Base.iterate(d::MiniBatches{T,R}, state=1) where {T,R<:AbstractRNG}
     if state > length(d.batches)
         for i = 1:length(d.batches)
             push!(d.indices,i)
@@ -211,8 +211,26 @@ function Base.iterate(d::RNNBatches, state=1)
     end
 end
 
-function Flux.gpu(d::RNNBatches)
-    return RNNBatches([gpu(d.batches[i]) for i = 1:d.length],d.indices,d.length,d.rng)  # Return a new struct with the modified field
+function Base.iterate(d::MiniBatches{T,Nothing}, state=1) where T
+    if state > length(d.batches)
+        for i = 1:length(d.batches)
+            push!(d.indices,i)
+        end
+        return nothing
+    else
+        batch_number = popat!(d.indices, 1)
+        return (d.batches[batch_number], state + 1)
+    end
 end
 
-Flux.@layer :expand RNNBatches trainable=(batches,)
+function Flux.gpu(d::MiniBatches)
+    return MiniBatches([gpu(d.batches[i]) for i = 1:d.length],d.indices,d.length,d.rng)  # Return a new struct with the modified field
+end
+
+Flux.@layer :expand MiniBatches
+function Flux.trainable(m::MiniBatches{D,R}) where {D<:AbstractData,R<:AbstractRNG}
+    return (batches=m.batches,)
+end
+function Flux.trainable(m::MiniBatches{T,R}) where {T<:Tuple,R<:AbstractRNG}
+    return ()
+end

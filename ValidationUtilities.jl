@@ -1,15 +1,86 @@
-# Must change to allow validation with multiple datasets
-function validate(snapshots,valdata::IOData; fc_low::Real=1/10,
-                                             fc_high::Real=1/2,
-                                             threshold::Real=-Inf,
-                                             std::Real=50.0,
-                                             prefilter::Bool=true)    
-    # Some admin
-    filter = digitalfilter(Bandpass(fc_low, fc_high, fs=1/valdata.dt), Butterworth(6))
+# 
+function processVoltage(v,prefilter,threshold,kernel,window)
+    # Bandpass filtering
+    if !isnothing(prefilter)
+        # Forward and backward application of the filter (non-causal, doubles order)
+        v̂_f = filtfilt(prefilter,v)   
+        # Apply symmetrized filter(non-causal, preserves order, assumes DC=0)
+        # v̂_f = filt(prefilter,v)
+        # v̂_f += reverse(filt(prefilter,reverse(v)))
+    else
+        v̂_f = v
+    end
+    # Threshold to isolate super-threshold part
+    if threshold > -Inf
+        v̂_f = relu.(v̂_f .- threshold)
+    end
+    if window > 0
+        spk_inds=findmaxima(v̂_f,window)[:indices]
+        v̂_f = zeros(length(v̂_f))
+        v̂_f[spk_inds] .= 1.0
+    end
+    # Smooth it out
+    if !isnothing(kernel)
+        # for non-causal kernels we should technically offset by length(kernel)
+        # correct for that when computing the cost
+        offset = fld(length(kernel),2)
+        v̂_f = DSP.conv(v̂_f,kernel)
+        v̂_f = v̂_f[offset+1:end-offset]
+    end
+    return v̂_f
+end
+
+function smoothingKernel(kernelType, std)
     cutoff = round(Int, 6.0 * std)
     k = cutoff:-1:-cutoff
-    gaussian_kernel = exp.(-k.^2 / (2 * std^2))
-    gaussian_kernel /= sum(gaussian_kernel)
+    if kernelType==:gaussian
+        kernel = exp.(-k.^2 / (2 * std^2))
+        kernel /= sum(kernel)
+    elseif kernelType==:laplace
+        kernel = exp.(-abs.(k) / std)
+        kernel /= sum(kernel)
+    else
+        error("Kernel type not recognized. Possible values are :gaussian and :laplace")
+    end
+end
+
+##
+# experiment="Experiment 22/PD1"
+# v = expDict[experiment][:valDict][expDict[experiment][:bestHP][1]][:data][1][1][:]
+# v_ang_sep = expDict[experiment][:valDict][expDict[experiment][:bestHP][1]][:predictionAngSep][1][1][:]
+# prefilter=(fc_low=1/50,fc_high=1/2,order=3)
+# prefilter = digitalfilter(Bandpass(prefilter[:fc_low], prefilter[:fc_high], fs=1/0.1), Butterworth(prefilter[:order]))
+# kernel = smoothingKernel(:gaussian, 1000.0)
+# thr= 5.
+# window = 10
+# vf = processVoltage(v,prefilter,thr,kernel,window)
+# vf_ang_sep = processVoltage(v_ang_sep,prefilter,thr,kernel,window)
+# # plot(v_ang_sep)
+# plt1=plot(vf)
+# plot!(vf_ang_sep)
+# plt2=plot(v)
+# plt3=plot(v_ang_sep)
+# plot(plt1,plt2,plt3,layout=(3,1))
+# xlims!(50000,90000)
+##
+
+# Must change to allow validation with multiple datasets
+function validate(snapshots,valdata::IOData; prefilter::Union{NamedTuple,Nothing}=(fc_low=1/10,fc_high=1/2,order=6),
+                                             threshold::Real=-Inf,
+                                             smooth::Union{NamedTuple}=(kernelType=:gaussian,std=50.0),
+                                             window=0)    
+    # Some admin
+    if !isnothing(prefilter)
+        prefilter = digitalfilter(Bandpass(prefilter[:fc_low], prefilter[:fc_high], fs=1/valdata.dt), Butterworth(prefilter[:order]))
+        offset = 5000
+    end
+    if !isnothing(smooth)
+        kernel = smoothingKernel(smooth[:kernelType], smooth[:std])
+        offset = fld(length(kernel),2)
+    else
+        kernel = nothing
+        offset = 0
+    end
 
     # Validation data
     # COMPUTE THIS IN THE DISTRIBUTED LOOP IN CASE WE LEARN TIMESCALES
@@ -17,23 +88,7 @@ function validate(snapshots,valdata::IOData; fc_low::Real=1/10,
     n_neurons = snapshots[1][:model].size[1]
 
     V = [RNNvaldata.rawdata[1].V[n][:] for n=1:n_neurons]
-    V_f = similar(V)
-    for n=1:n_neurons
-        # Bandpass filtering to isolate spike frequency    
-        if prefilter==true
-            v_f = filtfilt(filter, V[n])   
-        else
-            v_f = V[n]
-        end
-        # Threshold to isolate spike timings
-        threshold > -Inf ? v_f = relu.(v_f .- threshold) : nothing
-        # Smooth 
-        if std>0.0
-            v_f = DSP.conv(v_f,gaussian_kernel) # old v_f,inds_f = filter_signal(L,v_f)
-            v_f = v_f[cutoff+1:end-cutoff]
-        end
-        V_f[n] = v_f
-    end
+    V_f = [processVoltage(V[n],prefilter,threshold,kernel,window) for n=1:n_neurons]
     data_traces = (unfiltered=V,filtered=V_f)
 
     epochs = SharedArray{Int}(length(snapshots))
@@ -55,29 +110,15 @@ function validate(snapshots,valdata::IOData; fc_low::Real=1/10,
         V̂seq,X̂seq = net(RNNvaldata)
         V̂,X̂ = shotTrajectories(V̂seq,X̂seq)
         V̂ = [V̂[1][n][:] for n=1:n_neurons]  # first index is batch number
-        V̂_f = similar(V̂)
+        V̂_f = [processVoltage(V̂[n],prefilter,threshold,kernel,window) for n=1:n_neurons]
         for n=1:n_neurons
-            # Bandpass filtering to isolate the spikes
-            if prefilter==true
-                v̂_f = filtfilt(filter,V̂[n])   
-            else
-                v̂_f = V̂[n]
-            end
-            # Threshold to isolate spike timings
-            threshold > -Inf ? v̂_f = relu.(v̂_f .- threshold) : nothing
-            # Smooth 
-            if std>0.0
-                v̂_f = DSP.conv(v̂_f,gaussian_kernel) # old v̂_f,_ = filter_signal(L,v̂_f)
-                v̂_f = v̂_f[cutoff+1:end-cutoff]
-            end
-            V̂_f[n] = v̂_f
             predicted_traces[i][:unfiltered][n][:] = V̂[n]
             predicted_traces[i][:filtered][n][:] = V̂_f[n]
         end
 
         # Compute closed-loop MSE
         cl_loss[i] = sum([Flux.mse(V̂_f[n],V_f[n]) for n=1:n_neurons])/n_neurons
-        ang_sep[i] = sum([angular_separation(V̂_f[n],V_f[n]) for n=1:n_neurons])/n_neurons 
+        ang_sep[i] = sum([angular_separation(V̂_f[n][1+offset:end-offset],V_f[n][1+offset:end-offset]) for n=1:n_neurons])/n_neurons 
         ol_loss[i] = snapshots[i][:loss]
         epochs[i] = snapshots[i][:epoch]
         times[i] = snapshots[i][:time]
@@ -101,50 +142,85 @@ function validate(snapshots,valdata::IOData; fc_low::Real=1/10,
 
     return (netValLoss=netValLoss,predictionValLoss=predictionValLoss,minValLossInd=min_valLoss_ind,
             netAngSep=netAngSep,predictionAngSep=predictionAngSep,maxAngSepInd=max_angSep_ind,
-            netLastEpoch=snapshots[end][:model],
+            netLastEpoch=snapshots[end][:model],predictionLastEpoch=predicted_traces[end],lastEpochInd=length(snapshots),
             data=data_traces,valLoss=cl_loss,angSep=ang_sep,trainLoss=ol_loss,epochs=epochs,times=times)
 end
 
-function validate_conductances(snapshots,valdata::IOData,datapath,filename)
-    dt = valdata.dt
-    m_hh,h_hh,n_hh = load_HH(string(datapath,filename),proptrain);
-    g_Na_hh = 120*m_hh.^3 .* h_hh;
-    g_K_hh = 36*n_hh.^4;
+"""
+    Reducing size of dicts for analysis
+"""
+# function buildDict!(valDict,hpDict,hps; metric=:ValLoss, optMetric=Inf, hpsVals)
+#     if length(hps) > 0
+#         for hpval = (isnothing(hpvals[1]) ? unique(key[hps[1]] for key in keys(valDict)) : hpvals[1])
+#             hpDict[hps[1]] = hpval
+#             buildDict!(valDict,hpDict,hps[2:end]; metric=metric, optMetric=optMetric, hpsVals=hpsVals[2:end])
+#         end
+#     else
+#         key = (;(key => hpDict[key] for key in keys(first(keys(valDict))))...)
+#         # Filter bad models out!
+#         if haskey(valDict,key)
+#             if metric == :angSep
+#                 angSep = valDict[key][:angSep]
+#                 maxAngSepInd = valDict[key][:maxAngSepInd]
+#                 if angSep[maxAngSepInd] > optMetric
+#                     dict[NamedTuple{Tuple([hp1,hp2])}((hp1val,hp2val))] = valDict[key]
+#                 end
+#             elseif metric == :valLoss
+#                 valLoss = valDict[key][:valLoss]
+#                 minValLossInd = valDict[key][:minValLossInd]
+#                 if log10(valLoss[minValLossInd]) < optMetric
+#                     dict[NamedTuple{Tuple([hp1,hp2])}((hp1val,hp2val))] = valDict[key]
+#                 end
+#             else
+#                 error("Metric not recognized. Possible values are :AngSep and :ValLoss")
+#             end
+#             modelcount += 1
+#     end
+# end
 
-    RNNvaldata = MSData(snapshots[1][:model],valdata)
-    t  = RNNvaldata.rawdata[1].t
+function reduceDict(valDict::Dict, hpDict::Dict, hp1::Symbol, hp2::Symbol; metric=:ValLoss, optMetric=Inf, reduce=0, hp1vals=nothing, hp2vals=nothing)
+    dict=Dict()
+    modelcount = 0
+    metric = Symbol(lowercasefirst(string(metric)))
+    # length(hpsVals) == 0 ? hpsVals = [nothing for _ in 1:length(hps)] : (length(hpsVals) == length(hps) ? nothing : error("Number of hyperparameter values must match number of hyperparameters"))
 
-    g_Na_hh = g_Na_hh[(round(Int,t[1]/dt)+1):end]/maximum(g_Na_hh[(round(Int,t[1]/dt)+1):end])
-    g_K_hh = g_K_hh[(round(Int,t[1]/dt)+1):end]/maximum(g_K_hh[(round(Int,t[1]/dt)+1):end])
-
-    data_traces = (unfiltered=g_Na_hh,filtered=g_K_hh)
-    epochs = SharedArray{Int}(length(snapshots))
-    ol_loss = SharedArray{Float64}(length(snapshots))
-    cl_loss = SharedArray{Float64}(length(snapshots))
-    predicted_traces = @DArray [deepcopy(data_traces) for _=1:length(snapshots)]
-
-    @sync @distributed for i=1:length(snapshots)
-        net = snapshots[i][:model]
-
-        # Simulate model
-        V̂seq,X̂seq = net(RNNvaldata)
-        V̂,X̂ = shotTrajectories(V̂seq,X̂seq)   
-        G,maxG = conductances(net,V̂[1],X̂[1])
-        ĝ = G[1,1]
-        ĝ_Na = ĝ[1,:]/maximum(ĝ[1,:])
-        ĝ_K = ĝ[2,:]/maximum(ĝ[2,:])
-        
-        # Compute closed-loop MSE
-        cl_loss[i] = Flux.mse(ĝ_Na,g_Na_hh)
-        cl_loss[i] += Flux.mse(ĝ_K,g_K_hh)
-        epochs[i] = snapshots[i][:epoch]
-        ol_loss[i] = snapshots[i][:loss]
-        predicted_traces[i][1][:] = ĝ_Na
-        predicted_traces[i][2][:] = ĝ_K
-        println(string("Simulated model number ",i," of ",length(snapshots)))
+    for hp1val = (isnothing(hp1vals) ? unique(key[hp1] for key in keys(valDict)) : hp1vals)
+        hpDict[hp1] = hp1val
+        for hp2val = (isnothing(hp2vals) ? unique(key[hp2] for key in keys(valDict)) : hp2vals)
+            hpDict[hp2] = hp2val
+            key = (;(key => hpDict[key] for key in keys(first(keys(valDict))))...)
+            # Filter bad models out!
+            if haskey(valDict,key)
+                if metric == :angSep
+                    angSep = valDict[key][:angSep]
+                    maxAngSepInd = valDict[key][:maxAngSepInd]
+                    if angSep[maxAngSepInd] > optMetric
+                        dict[NamedTuple{Tuple([hp1,hp2])}((hp1val,hp2val))] = valDict[key]
+                    end
+                elseif metric == :valLoss
+                    valLoss = valDict[key][:valLoss]
+                    minValLossInd = valDict[key][:minValLossInd]
+                    if log10(valLoss[minValLossInd]) < optMetric
+                        dict[NamedTuple{Tuple([hp1,hp2])}((hp1val,hp2val))] = valDict[key]
+                    end
+                else
+                    error("Metric not recognized. Possible values are :AngSep and :ValLoss")
+                end
+                modelcount += 1
+            end
+        end  
     end
-    cl_loss[isnan.(cl_loss)] .= Inf
-    return cl_loss,ol_loss,epochs,data_traces,collect(predicted_traces)
+    if reduce>0
+        rev = (metric==:angSep ? true : false)
+        optMetricInd = (metric==:angSep ? :maxAngSepInd : :minValLossInd)
+        bestHP = sort(collect(keys(dict)), by = hp -> dict[hp][metric][dict[hp][optMetricInd]], rev=rev)
+        println(bestHP)
+        for hp in bestHP[end-(reduce-1):end]
+            pop!(dict,hp)
+        end
+    end
+    println("\nNumber of good models: ",length(dict)," out of ",modelcount,"\n")  
+    return dict
 end
 
 """
@@ -162,33 +238,32 @@ function plotValLosses(valDict::Dict;   title::String="",
                                         hpName="",
                                         lossType="",
                                         plotSize=(600,800),
-                                        hull=false,
                                         metric=:AngSep,
                                         plotBest=true,
                                         deltaEpochIndex=10,
                                         initEpochIndex=1,
-                                        opacityAfterFirst=0.3,
+                                        opacityAfterFirst=1.0,
                                         legendfontsize=12,
+                                        ylabelfontsize=12,
                                         linewidth=2.0,
-                                        legend=true)
+                                        legend=true,
+                                        epochTimes=true,
+                                        timeMode=:ms)
     plts = plotBest ? [plot() for _ in 1:4] : [plot() for _ in 1:2]
     local bestHP
     opct = 1.0
     for hp in sort(collect(keys(valDict)))
-        # Do we want to filter / hull the data?
-        if hull
-            window=[1,1]/2
-            valLoss = convexHull(valDict[hp][:valLoss]) #DSP.conv(valDict[hp][:valLoss],window)[2:end-2] #
-            angSep = concaveHull(valDict[hp][:angSep])  #DSP.conv(valDict[hp][:angSep],window)[2:end-2]#
-            epochs = valDict[hp][:epochs]               # valDict[hp][:epochs][2:end-1]
-        else
-            valLoss = valDict[hp][:valLoss]
-            angSep = valDict[hp][:angSep]
-            epochs = valDict[hp][:epochs]
-        end
+        valLoss = valDict[hp][:valLoss]
+        angSep = valDict[hp][:angSep]
+        epochs = valDict[hp][:epochs]
 
         # Get times to print in x tick labels
-        tTicks = (epochs[initEpochIndex:deltaEpochIndex:end],[string("Epoch ",epochs[i]," \n", getTime(valDict[hp][:times][i])) for i=initEpochIndex:deltaEpochIndex:length(epochs)])
+        trainingTicks = (epochs[initEpochIndex:deltaEpochIndex:end],["" for i=initEpochIndex:deltaEpochIndex:length(epochs)])
+        if epochTimes
+            tTicks = (epochs[initEpochIndex:deltaEpochIndex:end],[string("Epoch ",epochs[i]," \n", getTime(valDict[hp][:times][i];mode=timeMode)) for i=initEpochIndex:deltaEpochIndex:length(epochs)])
+        else
+            tTicks = (epochs[initEpochIndex:deltaEpochIndex:end],[string("Epoch ",epochs[i]) for i=initEpochIndex:deltaEpochIndex:length(epochs)])
+        end
 
         # Training loss plot
         plot!(plts[1],epochs,log10.(valDict[hp][:trainLoss]);
@@ -196,78 +271,57 @@ function plotValLosses(valDict::Dict;   title::String="",
                                     ylabel=string(lossType,"\n log training loss"),
                                     label=string(hpName,hp),
                                     legend=legend,
-                                    xticks=tTicks,
+                                    xticks=trainingTicks,
                                     legendfontsize=legendfontsize,
                                     linewidth=linewidth,
                                     opacity=opct)
+        
+        commonOpts = (xticks=tTicks,legend=false,linewidth=linewidth,opacity=opct)
+        
         # Validation plots
         if metric == :AngSep
-            # Traces
             plot!(plts[2],epochs,angSep;
                             ylabel=string(hull ? "max " : "","validation \n angular separation"),
-                            ylims=(0,1),
-                            label=string(hpName,hp),
-                            xticks=tTicks,
-                            linewidth=linewidth,
-                            legend=false,
-                            opacity=opct)
+                            ylims=(0.0,1.01),
+                            commonOpts...)
             bestHP = sort(collect(keys(valDict)), by = hp -> valDict[hp][:angSep][valDict[hp][:maxAngSepInd]], rev=true)
-            if plotBest
-                best_angsep = [valDict[hp][:angSep][valDict[hp][:maxAngSepInd]] for hp in sort(collect(keys(valDict)))]  
-                best_times = [valDict[hp][:times][valDict[hp][:maxAngSepInd]] for hp in sort(collect(keys(valDict)))]
-                # Best results
-                plot!(plts[3],sort(collect(keys(valDict))),best_angsep;
-                                                title="Best model angular separation",
-                                                xlabel=hpName,
-                                                marker=:circle,
-                                                legend=false,
-                                                linewidth=linewidth,
-                                                # yticks=(best_angsep,[round(a,digits=2) for a in best_angsep])
-                                                )
-                # Times
-                plot!(plts[4],sort(collect(keys(valDict))),best_times;
-                                                title="Best model training time",
-                                                xlabel=hpName,
-                                                legend=true,
-                                                linewidth=linewidth,
-                                                marker=:circle,
-                                                yticks=(best_times,[getTime(t) for t in best_times]))
-            end
         elseif metric == :ValLoss
-            # Traces
-            plot!(plts[2],epochs,log10.(valLoss),
-                                            ylabel=string(lossType,"\n log validation loss"),
-                                            label=string(hpName,hp),
-                                            legend=false,
-                                            xticks=tTicks,
-                                            linewidth=linewidth,
-                                            opacity=opct)
+            plot!(plts[2],epochs,log10.(valLoss);
+                            ylabel=string(lossType,"\n log validation loss"),
+                            commonOpts...)
             bestHP = sort(collect(keys(valDict)), by = hp -> valDict[hp][:valLoss][valDict[hp][:minValLossInd]], rev=false)
-            if plotBest
-                best_losses = [valDict[hp][:valLoss][valDict[hp][:minValLossInd]] for hp in sort(collect(keys(valDict)))]
-                best_times = [valDict[hp][:times][valDict[hp][:minValLossInd]] for hp in sort(collect(keys(valDict)))]
-                # Best results
-                plot!(plts[3],sort(collect(keys(valDict))),best_losses,
-                                                title="Best model validation loss",
-                                                xlabel=hpName,
-                                                marker=:circle,
-                                                legend=false,
-                                                linewidth=linewidth,
-                                                # yticks=(best_losses,[log10(l) for l in best_losses])
-                                                )
-
-                # Times
-                plot!(plts[4],sort(collect(keys(valDict))),best_times;
-                                                title="Best model training time",
-                                                xlabel=hpName,
-                                                legend=true,
-                                                linewidth=linewidth,
-                                                marker=:circle,
-                                                yticks=(best_times,[getTime(t) for t in best_times]))
-            end
-            opct = opacityAfterFirst
         else
             error("Metric not recognized. Possible values are :AngSep and :ValLoss")        
+        end
+        opct = opacityAfterFirst
+    end
+
+    commonOpts = (xlabel=hpName,marker=:circle,legend=false)
+    if plotBest
+        if metric == :AngSep
+            best_angsep = [valDict[hp][:angSep][valDict[hp][:maxAngSepInd]] for hp in sort(collect(keys(valDict)))]  
+            best_times = [valDict[hp][:times][valDict[hp][:maxAngSepInd]] for hp in sort(collect(keys(valDict)))]
+            # Best results
+            plot!(plts[3],sort(collect(keys(valDict))),best_angsep;
+                                            title="Best model angular separation",
+                                            commonOpts...)
+            # Corresponding times
+            plot!(plts[4],sort(collect(keys(valDict))),best_times;
+                                            title="Best model training time",
+                                            yticks=(best_times,[getTime(t;mode=timeMode) for t in best_times]),
+                                            commonOpts...)
+        else
+            best_losses = [valDict[hp][:valLoss][valDict[hp][:minValLossInd]] for hp in sort(collect(keys(valDict)))]
+            best_times = [valDict[hp][:times][valDict[hp][:minValLossInd]] for hp in sort(collect(keys(valDict)))]
+            # Best results
+            plot!(plts[3],sort(collect(keys(valDict))),best_losses;
+                                            title="Best model validation loss",
+                                            commonOpts...)
+            # Corresponding times
+            plot!(plts[4],sort(collect(keys(valDict))),best_times;
+                                            title="Best model training time",
+                                            yticks=(best_times,[getTime(t;mode=timeMode) for t in best_times]),
+                                            commonOpts...)
         end
     end
 
@@ -282,7 +336,7 @@ function plotValLosses(valDict::Dict;   title::String="",
         println("Corresponding epochs: ")
         println([valDict[hp][:epochs][valDict[hp][:maxAngSepInd]] for hp in bestHP])
         println("Corresponding times: ")
-        println([getTime(valDict[hp][:times][valDict[hp][:maxAngSepInd]]) for hp in bestHP])
+        println([getTime(valDict[hp][:times][valDict[hp][:maxAngSepInd]];mode=timeMode) for hp in bestHP])
     else
         println("Best hyperparameters in decreasing order: ")
         println(Vector{Any}(bestHP))
@@ -293,20 +347,30 @@ function plotValLosses(valDict::Dict;   title::String="",
         println("Corresponding epochs: ")
         println([valDict[hp][:epochs][valDict[hp][:minValLossInd]] for hp in bestHP])
         println("Corresponding times: ")
-        println([getTime(valDict[hp][:times][valDict[hp][:minValLossInd]]) for hp in bestHP])
+        println([getTime(valDict[hp][:times][valDict[hp][:minValLossInd]];mode=timeMode) for hp in bestHP])
     end
 
-    plt = plot(plts...,layout=(length(plts),1),size=plotSize,leftmargin=5Plots.mm,bottommargin=5Plots.mm)
+    plt = plot(plts...,layout=(length(plts),1),size=plotSize,ylabelfontsize=ylabelfontsize,leftmargin=5Plots.mm,bottommargin=5Plots.mm)
     display(plt)
     return bestHP,plts
 end
 
-function getTime(t::Float64)
+function getTime(t::Float64; mode=:ms)
     t = round(Int,t)
-    h = floor(Int,t/3600)
-    m = floor(Int,(t-h*3600)/60)
-    s = t-h*3600-m*60
-    return string(h,"h ",m,"m ",s,"s")
+    if mode == :hms
+        h = floor(Int,t/3600)
+        m = floor(Int,(t-h*3600)/60)
+        s = t-h*3600-m*60
+        return string(h,"h ",m,"m ",s,"s")
+    elseif mode ==:ms
+        m = floor(Int,t/60)
+        s = t-m*60
+        return string(m,"m ",s,"s")
+    elseif mode==:s
+        return string(t," seconds")
+    else
+        error("Mode not recognized. Possible values are :hms, :ms, and :s")
+    end
 end
 
 function plotValVoltages(val::NamedTuple; 
@@ -315,54 +379,61 @@ function plotValVoltages(val::NamedTuple;
                     vlim=:auto,
                     plotSize=(600,400),
                     filtered=false,
-                    xlabel="time [ms]",
+                    tlabel="time [s]",
                     vLabel=true,
-                    overlap=true,
+                    overlay=true,
                     vLegend=true,
-                    vTicks=([-50,-30],["-50mV","-30mV"]),
+                    vTicks=([-50,-30],["-50","-30"]),
                     legend=true,
                     metric=:AngSep,
-                    linewidth=1.0)
+                    linewidth=1.5,
+                    downsample=1)
 
     n_neurons=length(val[:data][1])
     L = length(val[:data][1][1])
-    inds = floor(Int,L*plotPercent[1])+1:floor(Int,L*plotPercent[2])
+    inds = floor(Int,L*plotPercent[1])+1:downsample:floor(Int,L*plotPercent[2])
     L = length(inds)
     netType = Symbol("net" * string(metric))
     predictionMetric = Symbol("prediction" * string(metric))
     t = (1:L)*val[netType].cell.dt/1000
 
+    commonOpts = (linewidth=linewidth,yticks=vTicks,xticks=false,ylim=vlim,xlabel="")
+
     plts=[]
     for n=1:n_neurons
         plt1=plot(t,val[:data][1][n][inds],
             label = vLegend ? string("target") : false,
-            ylim=vlim,
-            yticks=vTicks,
-            ylabel=(isa(vLabel,Bool) ? (vLabel ? string("v",n) : "") : vLabel[n]),
-            xlabel="",
-            xformatter = (x -> ""),
+            ylabel=(isa(vLabel,Bool) ? (vLabel ? L"$v_%$n$ [mV]" : "") : vLabel[n]),
             title=(n==1 ? title : ""),
-            legend=(n==n_neurons ? legend : false),
-            linewidth=linewidth)
-        plt2 = overlap ? plt1 : plot()
+            legend=(n==1 ? legend : false);
+            commonOpts...
+            )
+        plt2 = overlay ? plt1 : plot()
         plt2 = plot!(plt2,t,val[predictionMetric][1][n][inds],
             label = vLegend ? string("prediction") : false,
-            ylim=vlim,
-            yticks=vTicks,
-            ylabel=(isa(vLabel,Bool) ? (vLabel ? string("v",n) : "") : vLabel[n]),
-            xlabel=(n==n_neurons ? xlabel : ""),
-            xformatter=(n==n_neurons ? (x -> x) : (x -> "")),
+            ylabel=(isa(vLabel,Bool) ? (vLabel ? L"$v_%$n$ [mV]" : "") : vLabel[n]),
             color=palette(:default)[2],
-            legend=(n==n_neurons ? legend : false),
-            linewidth=linewidth)
-        overlap ? push!(plts,plt2) : append!(plts,[plt1,plt2])
+            legend=(n==1 ? legend : false);
+            commonOpts...)
+        overlay ? push!(plts,plt2) : append!(plts,[plt1,plt2])
         if filtered
             plt3=plot(t,val[:data][2][n][inds],label=string("Data ",n),ylabel="Filtered traces")
             push!(plts,plot(plt3,t,val[predictionMetric][2][n][inds],label=string("Filtered ",n)))
         end
+        # Plot time info only on bottommost plot
+        if n==n_neurons
+            if isa(tlabel,String)
+                plot!(plts[end],xlabel=tlabel,xticks=true)
+            elseif isa(tlabel,Real)
+                plot!(plts[end],[0.0,tlabel],ylims(plts[end])[1]*[1,1],color=:black,linewidth=3,label=false)
+                annotate!(0.5, ylims(plts[end])[1],text("$tlabel s",:top,Plots.default(:fontfamily)))
+            else
+                error("tlabel must be a String or a Real number")
+            end
+        end
     end
     plt = plot(plts..., leftmargin=5Plots.mm,
-                        bottommargin=hcat([-7.5Plots.mm for i=1:1, j_=1:length(plts)-1],[5Plots.mm;;]),
+                        bottommargin=hcat([-2.5Plots.mm for i=1:1, j_=1:length(plts)-1],[5Plots.mm;;]),
                         layout=(length(plts),1),
                         size=plotSize)
     display(plt)
@@ -454,13 +525,16 @@ end
     Keyword arguments:
     n: number of the neuron in the network
 """
-function plotIV(valDict::Dict;  n = 1,
-                                m = 1,
-                                hyParsName::Union{Nothing,String}=nothing,
-                                vrange=(-65,-20),
-                                plotSize=(800,600),
-                                metric=:AngSep)
+function plotIV!(valDict::Dict, IVplts=nothing; n = 1,m = 1,
+                                                envelope=false,
+                                                hyParsName::Union{Nothing,String}=nothing,
+                                                vrange=(-65,-20),
+                                                plotSize=(800,600),
+                                                vticks=:auto,
+                                                metric=:AngSep,
+                                                color=:blue)
     # Some admin
+    local plotLeak
     V̄ = vrange[1]:0.01:vrange[2]
     netType = Symbol("net" * string(metric))
     
@@ -471,48 +545,132 @@ function plotIV(valDict::Dict;  n = 1,
     isnothing(hyParsName) ? hyParsName = "Hyperparameter" : nothing
 
     # Initialize plots
-    plt_tot,plt_leak,plt_ion = plot(),plot(), [plot() for _ in 1:n_currents]
+    if isnothing(IVplts)
+        plt_tot,plt_leak,plt_ion = plot(),plot(),[plot() for _ in 1:n_currents]
+    else
+        plt_tot = IVplts[1]
+        plt_leak = IVplts[2]
+        plt_ion = IVplts[3]
+    end
 
     # Plot IV curves for the network associated to each hyperparameter
-    for hp in sort(collect(keys(valDict)))
-        # Recover model
-        net = valDict[hp][netType]
-    
-        # Compute IV curves
-        IVion,IVleak=IV(net,V̄,V̄)
-        plotIV!(plt_tot,plt_leak,plt_ion,V̄,IVleak[n],IVion[n,m],currentNames,lb="$hyParsName = $hp")
+    if !envelope
+        for hp in sort(collect(keys(valDict)))
+            # Recover model
+            net = valDict[hp][netType]
+            # Compute IV curves
+            IVion,IVleak=IV(net,V̄,V̄)
+            plotIV!(plt_tot,plt_leak,plt_ion,V̄,IVleak[n],IVion[n,m],vticks=vticks,currentNames,lb="$hyParsName = $hp")
+            isnothing(IVleak[n]) ? plotLeak = false : plotLeak = true
+        end
+    else
+        IVleak_all = zeros(length(valDict),length(V̄))
+        IVion_all = zeros(n_currents,length(valDict),length(V̄))
+        for (i,hp) in enumerate(sort(collect(keys(valDict))))
+            # Recover model
+            net = valDict[hp][netType]
+            # Compute IV curves
+            IVion,IVleak=IV(net,V̄,V̄)
+            for j=1:n_currents
+                IVion_all[j,i,:] = IVion[n,m][j,:]
+            end
+            if !isnothing(IVleak[n])
+                IVleak_all[i,:] = IVleak[n][:]
+                plotLeak = true
+            else
+                plotLeak = false
+            end
+        end
+
+        # Plot mean and standard deviation of IV curves
+        if plotLeak
+            IVleak_mean = mean(IVleak_all,dims=1)[:]
+            IVleak_std = std(IVleak_all,dims=1)[:]
+        else
+            IVleak_mean=IVleak_std=nothing
+        end
+        IVion_mean = dropdims(mean(IVion_all,dims=2),dims=2)
+        IVion_std = dropdims(std(IVion_all,dims=2),dims=2)
+
+        plotIV_envelope!(plt_tot,plt_leak,plt_ion,V̄,IVleak_mean,IVion_mean,IVleak_std,IVion_std,currentNames,vticks=vticks,color=color,lb=hyParsName)
     end
-    iseven(n_currents) ? nothing : push!(plt_ion,plot())
-    plot(plt_tot,plt_leak,plt_ion...,
+    if plotLeak
+        plts = (iseven(n_currents) ? (plt_tot,plt_leak,plt_ion...) : (plt_tot,plt_leak,plt_ion...,plot()))
+    else
+        plts = (isodd(n_currents) ? (plt_tot,plt_ion...,plot()) : (plt_tot,plt_ion...))
+    end
+    plt=plot(plts...,
         layout=(2,ceil(Int,(n_currents+2)/2)), 
         size=plotSize,
         margin=5.0Plots.mm)
+    return plt
 end
 
-function plotIV!(plt_tot,plt_leak,plt_ion,V̄,IVleak,IVion,currentNames;lb="label")
-    IVtot = sum(IVion,dims=1)[:] + IVleak[:]
+function plotIV!(plt_tot,plt_leak,plt_ion,V̄,IVleak,IVion,currentNames;lb="label",vticks=:auto)
+    IVtot = sum(IVion,dims=1)[:]
+
+    opts = (lw=2,label=lb,xlabel=L"$v$ [mV]",xticks=vticks)
     # Plot Leak curves
-    plt_leak=plot!(plt_leak,V̄[:],IVleak[:],
-                                legend=false,
-                                xlabel="v [mV]",
-                                ylabel="[nA]",
-                                title="Leak IV curve",
-                                label=lb)
+    if !isnothing(IVleak)
+        IVtot += IVleak[:]
+        plt_leak=plot!(plt_leak,V̄[:],IVleak[:],
+                                    legend=false,
+                                    ylabel="[nA]",
+                                    title="Leak current";
+                                    opts...)
+    end
+
     # Plot Ion ionicCurrents
     for i=1:length(currentNames)
         plt_ion[i]=plot!(plt_ion[i],V̄[:],IVion[i,:],
                                 legend=false,
-                                xlabel="v [mV]",
-                                ylabel="[nA]",
-                                title=string(currentNames[i]," current IV curve"),
-                                label=lb)
+                                ylabel=(i==1 ? "[nA]" : ""),
+                                title=string(currentNames[i]," current");
+                                opts...)
     end
     # Plot Total current
-    plt_tot=plot!(plt_tot,V̄[:],IVtot[:],legend=:bottomright,
-                                xlabel="v [mV]",
+    plt_tot=plot!(plt_tot,V̄[:],IVtot[:],
+                                legend=:topright,
                                 ylabel="[nA]",
-                                title="Steady-state IV curve",
-                                label=lb)
+                                title="Total current";
+                                opts...)
+end
+
+function plotIV_envelope!(plt_tot,plt_leak,plt_ion,V̄,IVleak,IVion,IVleak_std,IVion_std,currentNames;vticks=:auto,color=:blue,lb="")
+    # Make sure standard deviaton is computed properly
+    α=0.3
+    mean_opts = (lw=2,xticks=vticks,label=lb*" mean",c=color,xlabel=L"$v$ [mV]")
+    std_opts = (fillalpha=α,lw=0,c=color,label="±1 SD")
+
+    if !isnothing(IVleak)
+        IVtot = sum(IVion,dims=1)[:] + IVleak[:]
+        IVtot_std = sqrt.(sum(IVion_std.^2, dims=1)[:] + IVleak_std.^2)
+        # Plot Leak curves
+        plt_leak=plot!(plt_leak,V̄[:],IVleak[:],
+                                    legend=false,
+                                    title="Leak current";
+                                    mean_opts...)
+
+        plt_leak=plot!(plt_leak,V̄[:],IVleak[:].+IVleak_std[:],fillrange=(IVleak[:].-IVleak_std[:]);std_opts...)
+    else
+        IVtot = sum(IVion,dims=1)[:]
+        IVtot_std = sqrt.(sum(IVion_std.^2, dims=1)[:])
+    end
+    
+    # Plot Ion ionicCurrents
+    for i=1:length(currentNames)
+        plt_ion[i]=plot!(plt_ion[i],V̄[:],IVion[i,:];
+                                legend=(i==1 ? :bottomleft : false),
+                                title=string(currentNames[i]," current"),
+                                mean_opts...)
+        plt_ion[i]=plot!(plt_ion[i],V̄[:],IVion[i,:].+IVion_std[i,:],fillrange=(IVion[i,:].-IVion_std[i,:]);std_opts...)
+    end
+    # Plot Total current
+    plt_tot=plot!(plt_tot,V̄[:],IVtot[:],
+                                legend=:topright,
+                                title="Total current";
+                                mean_opts...)
+    plt_tot=plot!(plt_tot,V̄[:],IVtot[:]+IVtot_std[:],fillrange=IVtot[:]-IVtot_std[:];std_opts...)
 end
 
 """
@@ -523,12 +681,17 @@ function getVoltagePlots(net::Network,data::IOData; neurons::AbstractVector{Int}
                                                     vlims=:auto,
                                                     vticks=:auto,
                                                     Iticks=:auto,
+                                                    tbar=nothing,   # time bar in seconds
                                                     tticks=:auto,
-                                                    tlabel="t [ms]",
+                                                    tlabel="t [ms]",    
+                                                    IUnit="[nA]",
                                                     overlay=false,
                                                     linewidth=1.5,
                                                     predictionColor=palette(:default)[1],
-                                                    gtf=false)
+                                                    vtitle="",
+                                                    gtf=false,
+                                                    downsample=1,
+                                                    tlabelfontsize=12)
     # Simulate the network
     if !gtf 
         t,V̂,X̂,V,Iapp,T = net(data)
@@ -538,17 +701,42 @@ function getVoltagePlots(net::Network,data::IOData; neurons::AbstractVector{Int}
 
     # Get the indices to plot
     L = length(t)
-    inds = floor(Int,L*plotPercent[1])+1:floor(Int,L*plotPercent[2])
+    inds = floor(Int,L*plotPercent[1])+1:downsample:floor(Int,L*plotPercent[2])
+
+    # Type of time axis
+    if !isnothing(tbar)
+        tticks = false
+        tlabel = ""
+    end
 
     # Plot the predictions and the voltage
     plt_neurons = []
     for n in neurons
-        plt1 = plot(t[inds]/1000,V[n][inds],xlabel=tlabel,xticks=tticks,yticks=vticks,ylims=vlims,color=:black,linewidth=linewidth,ylabel=L"v \;\; \mathrm{(target)}")        
-        plt2 = plot(t[inds]/1000,V̂[n][inds],xlabel="",xticks=tticks,yticks=vticks,ylims=vlims,linewidth=linewidth,color=predictionColor,ylabel=L"v \;\; \mathrm{(prediction)}")
+        plt1 = plot(t[inds]/1000,V[n][inds],xlabel=tlabel,
+                                            xticks=tticks,
+                                            yticks=vticks,
+                                            ylims=vlims,
+                                            color=:black,
+                                            linewidth=linewidth,
+                                            ylabel=L"$v_{\mathrm{target}}$ [mV]",
+                                            title=vtitle)        
+        plt2 = plot(t[inds]/1000,V̂[n][inds],xlabel="",
+                                            xticks=tticks,
+                                            yticks=vticks,
+                                            ylims=vlims,
+                                            linewidth=linewidth,
+                                            color=predictionColor,
+                                            ylabel=L"$v$ [mV]")
         if overlay
             plt2 = plot!(t[inds]/1000,V[n][inds],xlabel=tlabel,color=:black,linewidth=linewidth,opacity=0.5,style=:dash,ylabel="")
         end
-        plt3 = plot(t[inds]/1000,Iapp[n][inds],xticks=tticks,yticks=Iticks,color=:black,ylabel=L"$I_{\mathrm{app}}$")
+        plt3 = plot(t[inds]/1000,Iapp[n][inds],xticks=tticks,yticks=Iticks,color=:black,ylabel=L"$I_{\mathrm{app}}$ %$IUnit")
+        if !isnothing(tbar)
+            for p = [plt1,plt2,plt3]
+                plot!(p,[t[inds[1]]/1000,t[inds[1]]/1000+tbar],ylims(p)[1]*[1,1],color=:black,linewidth=linewidth,label=false)
+                annotate!(t[inds[1]]/1000+tbar/2, ylims(p)[1],text("$tbar s",:top,Plots.default(:fontfamily),tlabelfontsize))
+            end
+        end
         push!(plt_neurons,(pltV=plt1,pltV̂=plt2,pltIapp=plt3))
     end
     return plt_neurons,t,V̂,X̂,V,Iapp,T,inds
@@ -573,7 +761,7 @@ function plotVoltages(net::Network,data::IOData; neurons::AbstractVector{Int}=[1
             push!(plts,plot(plt_neurons[n].pltV,plt_neurons[n].pltV̂,plt_neurons[n].pltIapp,layout=l,size=plotSize))
         end
     end
-    plot(plts...,layout=(1,length(plts)),framestyle=:grid,legend=legend,labelfontsize=labelfontsize,tickfontsize=tickfontsize,leftmargin=5Plots.mm)
+    plot(plts...,layout=(1,length(plts)),legend=legend,labelfontsize=labelfontsize,tickfontsize=tickfontsize,leftmargin=5Plots.mm,bottommargin=5Plots.mm)
 end
 
 function plotConductances(net::Network,iodata::IOData; kwargs...)
@@ -582,92 +770,90 @@ end
 
 function plotCurrents(net::Network,iodata::IOData;  n=1,    #neuron number
                                                     m=1,    #total current number
-                                                    currentTicks=:auto,
                                                     legend=false,
+                                                    tbar=nothing,   # time bar in seconds
                                                     tticks=:auto,
                                                     tlabel="t [s]",
+                                                    gUnit="[mS]",
+                                                    IUnit="[nA]",
                                                     plotSize=(800,600),
                                                     plotPercent::Tuple{AbstractFloat,AbstractFloat}=(0.0,1.0),
                                                     tickfontsize=12,
                                                     xlabelfontsize=12,
                                                     ylabelfontsize=12,
                                                     plotConductances=false,
-                                                    conductanceData=false,
+                                                    trueData=false,
+                                                    offsetTrue=false,
                                                     overlay=true,
                                                     linewidth=1.5,
                                                     predictionColor=palette(:default)[1],
                                                     kwargs...)
     
     # Recover voltage plots and data to compute currents and conductances
-    plt_neurons,t,V̂,X̂,V,Iapp,T,inds = getVoltagePlots(net,iodata; tlabel=vtlabel="",predictionColor=predictionColor, linewidth=linewidth, overlay=overlay, plotPercent=plotPercent, tticks=false, kwargs...)
+    plt_neurons,t,V̂,X̂,V,Iapp,T,inds = getVoltagePlots(net,iodata;neurons=[n,],tticks=(isnothing(tbar) ? tticks : false),tlabel="",predictionColor=predictionColor, linewidth=linewidth, overlay=overlay, plotPercent=plotPercent,kwargs...)
 
     # Recover current names
     currentNames = keys(net[n,m].ionicCurrents)
-    n_currents = length(currentNames)
+    
+    # Recover ionic currents and conductances
+    g = conductances(net,V̂,X̂)
+    iIon = ionicCurrents(net,V̂,X̂)
 
-    # Get current ticks 
-    if currentTicks==:auto
-        currentTicks = [:auto for _ in 1:n_currents]
-    else
-        if length(currentTicks) != n_currents
-            error("Number of current yticks must match the number of ionicCurrents.")
+    # Plot conductances or ionic currents
+    pltCurrents=[]
+    for i=1:length(currentNames)
+        currentName = currentNames[i]
+        if !isnothing(g[n,m][i]) && plotConductances
+            y = g[n,m][i][inds]
+            str="g"
+            unit=gUnit
+            dec=2
+        else
+            y=iIon[n,m][i,inds]
+            str="I"
+            unit=IUnit
+            dec=1
         end
+        plt = plot()
+        offset=0.0
+        if trueData
+            ytrue = T
+            plot!(plt,t[inds]/1000,ytrue[i,inds],
+                    color=:black,
+                    opacity=0.5,
+                    style=:dash,
+                    linewidth=linewidth)
+            offsetTrue ? offset = mean(ytrue[n,inds])-mean(y) : nothing
+        end
+        plt = plot!(plt,t[inds]/1000,y.+offset,
+                    color=predictionColor,
+                    linewidth=linewidth,
+                    ylabel=string(L"${%$str}_{\mathrm{%$currentName}}$ %$unit"),
+                    xticks=(isnothing(tbar) ? tticks : false))
+        yticks!(plt,[yticks(plt)[1][1][1],yticks(plt)[1][1][end-1]],
+                    [string(round(yticks(plt)[1][1][1],digits=dec)),
+                        string(round(yticks(plt)[1][1][end-1],digits=dec))])
+        push!(pltCurrents,plt)
     end
     
-    # Recover ionic currents or conductances
-    if plotConductances
-        g = conductances(net,V̂,X̂)
-        iIon = ionicCurrents(net,V̂,X̂)
-        pltCurrents=[]
-        for i=1:length(g[n,m])
-            currentName=currentNames[i]
-            if isnothing(g[n,m][i])
-                y=iIon[n,m][i,inds]
-                str="I"
-            else
-                y = g[n,m][i][inds]
-                str="g"
-            end
-            plt = plot(t[inds]/1000,y,
-                        color=predictionColor,
-                        linewidth=linewidth,
-                        # ylabel=string(L"\mathrm{%$currentName \;\; %$str}"),
-                        ylabel=string(L"{%$str}_{\mathrm{%$currentName}}"),
-                        yticks=currentTicks[i],
-                        xticks=(i==length(g[n,m]) ? tticks : false),
-                        xlabel=(i==length(g[n,m]) ? tlabel : ""))
-                if conductanceData
-                    gtrue = T
-                    plot!(plt,t[inds]/1000,gtrue[i,inds],
-                            color=:black,
-                            opacity=0.5,
-                            style=:dash,
-                            linewidth=linewidth)
-                end
-            push!(pltCurrents,plt)
-        end
+    if isnothing(tbar)
+        plot!(pltCurrents[end],xticks=tticks,xlabel=tlabel)
+        bmargin=0.0Plots.mm
     else
-        iIon = ionicCurrents(net,V̂,X̂)
-        pltCurrents = [plot(t[inds]/1000,iIon[n,m][i,inds],
-            linewidth=linewidth,
-            color=predictionColor,
-            ylabel=string(L"\mathrm{%$currentName current}"),
-            yticks=currentTicks[i],
-            xticks=(i==size(iIon[n,m],1) ? tticks : false),
-            xlabel=(i==length(g[n,m]) ? tlabel : ""),
-            leftmargin=5Plots.mm,
-            ) for i=1:size(iIon[n,m],1)]
+        plot!(pltCurrents[end],[t[inds[1]]/1000,t[inds[1]]/1000+tbar],ylims(pltCurrents[end])[1]*[1,1],color=:black,linewidth=3,label=false)
+        annotate!(pltCurrents[end],t[inds[1]]/1000+tbar/2, ylims(pltCurrents[end])[1],text("$tbar s",:top,Plots.default(:fontfamily),12))
+        bmargin=5.0Plots.mm
     end
-    
+
     if overlay
-        pltVoltage = [plt_neurons[n][:pltV̂],]
+        pltVoltage = [plt_neurons[1][:pltV̂],]
         l = (1+length(pltCurrents),1)
     else
-        pltVoltage = [plt_neurons[n][:pltV],plt_neurons[n][:pltV̂]]
+        pltVoltage = [plt_neurons[1][:pltV],plt_neurons[1][:pltV̂]]
         l = (2+length(pltCurrents),1)
     end
-    plt = plot(pltVoltage...,pltCurrents...,layout=l,size=plotSize,legend=legend,framestyle=:grid,tickfontsize=tickfontsize,xlabelfontsize=xlabelfontsize,ylabelfontsize=ylabelfontsize,
-                    bottom_margins=permutedims([0.0Plots.mm for i=1:(length(pltVoltage)+length(pltCurrents))]),
+    plt = plot(pltVoltage...,pltCurrents...,layout=l,size=plotSize,legend=legend,tickfontsize=tickfontsize,xlabelfontsize=xlabelfontsize,ylabelfontsize=ylabelfontsize,
+                    bottom_margins=permutedims([[0.0Plots.mm for i=1:(length(pltVoltage)+length(pltCurrents)-1)];bmargin]),
                     left_margin=5.0Plots.mm)
     display(plt)
     return plt
@@ -743,35 +929,44 @@ end
     Function used to plot Multiple shooting resutls shot by shot
     Currently only working if MSData was constructed with a single IOData
 """
-function multiple_shooting_plot(net::Network,d::MSData,shotIndex::Tuple{Int64, Int64};neuron_index=1,plotStates=false)
+function multiple_shooting_plot(net::Network,d::MSData,shotIndex::Tuple{Int64, Int64};neuron_index=1,plotStates=false,tUnit=:index)
     Ni,Nf = shotIndex
     V̂seq,X̂seq = net(d)
     V̂,X̂ = shotTrajectories(V̂seq,X̂seq)
     
     tinds = [(i-1)*d.shotsize:i*d.shotsize-1 for i = Ni:Nf]
     binds = [tinds[i][1] for i=1:(Nf-Ni+1)]
-    
+    if tUnit == :index 
+        dt = 1 
+        tLabel = "k [samples]"
+    elseif tUnit == :ms
+        dt = net.cell.dt
+        tLabel = "t [ms]"
+    else
+        error("tUnit must be :index or :ms")
+    end
+
     # Plot validation data
-    plt=plot(reduce(vcat,tinds),d.rawdata[1].V[neuron_index][reduce(vcat,tinds).+ 1])
+    plt=plot(reduce(vcat,tinds)*dt,d.rawdata[1].V[neuron_index][reduce(vcat,tinds).+ 1],xlabel=tLabel)
     if plotStates
-        pltX=[plot() for j=1:size(X̂[1][neuron_index][neuron_index],1)]
+        pltX=[plot(xlabel=tLabel) for j=1:size(X̂[1][neuron_index][neuron_index],1)]
     end
     
     # Plot batch trajectories
     for (i,n) in enumerate(Ni:Nf)
-        plt = plot!(plt,tinds[i],vec(V̂[n][neuron_index]),color=:orange,legend=false)
+        plt = plot!(plt,tinds[i]*dt,vec(V̂[n][neuron_index]),color=:orange,legend=false)
         if plotStates
             for j=1:size(X̂[1][neuron_index][neuron_index],1)
-                pltX[j] = plot!(pltX[j],tinds[i],X̂[n][neuron_index][neuron_index][j,:],color=:orange,legend=false)
+                pltX[j] = plot!(pltX[j],tinds[i]*dt,X̂[n][neuron_index][neuron_index][j,:],color=:orange,legend=false)
             end
         end
     end
     
     # Plot initial conditions
-    plt=scatter!(plt,binds,d.V₀[neuron_index].value[1,Ni:Nf],color=:black,markersize = 2,legend=false)
+    plt=scatter!(plt,binds*dt,d.V₀[neuron_index].value[1,Ni:Nf],color=:black,markersize = 2,legend=false)
     if plotStates
         for j=1:size(X̂[1][neuron_index][neuron_index],1)
-            pltX[j]=scatter!(pltX[j],binds,d.X₀[neuron_index,neuron_index].value[j,Ni:Nf],color=:black,markersize = 2,legend=false)
+            pltX[j]=scatter!(pltX[j],binds*dt,d.X₀[neuron_index,neuron_index].value[j,Ni:Nf],color=:black,markersize = 2,legend=false)
         end
         return plt,pltX
     else
@@ -814,7 +1009,8 @@ function angular_separation(smoothed_train1, smoothed_train2)
     dot_product = dot(smoothed_train1, smoothed_train2)
     norm1 = norm(smoothed_train1)
     norm2 = norm(smoothed_train2)
-    return dot_product / (norm1 * norm2)
+    # return dot_product / (norm1 * norm2)
+    return dot_product / max(norm1^2,norm2^2)
 end
 
 """
@@ -887,13 +1083,4 @@ function ANNplotChannel(net,data,neuron_inds,channel_inds;overlay=false,lw=1)
         push!(neuron_plt,channel_plt)
     end
     return neuron_plt
-end
-
-function convexHull(x::AbstractVector)
-    return [minimum(x[1:i]) for i=1:length(x)]
-end
-
-function concaveHull(x::AbstractVector)
-    x = [x[i]==-Inf ? 0.0 : x[i] for i=1:length(x)]
-    return [maximum(x[1:i]) for i=1:length(x)]
 end

@@ -1,7 +1,7 @@
 # Load workers for validating models in parallel
 using Distributed
 rmprocs(workers())
-addprocs(14, exeflags="--project")
+addprocs(7, exeflags="--project")
 # Load code into workers
 @everywhere begin
     using Pkg
@@ -62,11 +62,14 @@ Na_currentHP = TransientCurrentHP((Na[:actInds],layerUnits,layerFun,actlayerType
                                     (Na[:inactInds],layerUnits,layerFun,inactlayerTypes),Na[:g₀],Na[:E₀];
                                     actNormLims=(-85.0,30.0),
                                     inactNormLims=(-90.0,-40.0),
+                                    actRegWeight=(1.0,0.0),
+                                    inactRegWeight=(1.0,0.0),
                                     trainOpt...)
 # Potassium
 Kd = (g₀ = 60.0, E₀ = -77.0, xInds = slow)
 Kd_currentHP = ActivationCurrentHP(Kd[:xInds],layerUnits,layerFun,actlayerTypes,Kd[:g₀],Kd[:E₀];
                                     actNormLims=(-100.0,35.0),
+                                    actRegWeight=(1.0,0.0),
                                     trainOpt...)
 
 # Ionic current
@@ -142,55 +145,63 @@ for seed = [123,321,456,654,789,987]
     # Teacher forcing validation
     std=50.0
     threshold=-Inf
-    prefilter=false
-    valOpt = (prefilter=prefilter,threshold=threshold,std=std,fc_low=1/50,fc_high=1/2)
+    valOpt = (prefilter=(fc_low=1/50,fc_high=1/2,order=3),threshold=threshold,smooth=(kernelType=:gaussian,std=std))
     val_tf = validate(train_tf[:snapshots],valdata; valOpt...);
 
     # Save
-    valDict[(std=std,threshold=threshold,prefilter=prefilter,epochs=epochs_tf,batchsize=batchsize_tf,shuffle=shf,ρ=ρ,Δ=Δ,β₁=β₁,β₂=β₂,seed=seed,ltiType=string(ltiType))] = val_tf
+    valDict[(std=std,threshold=threshold,epochs=epochs_tf,batchsize=batchsize_tf,shuffle=shf,ρ=ρ,Δ=Δ,β₁=β₁,β₂=β₂,seed=seed,ltiType=string(ltiType))] = val_tf
     # @save string(modelpath,"valTF.bson") valDict
 end
 
 ###############################################
 ## Validation
 ###############################################
-# @load string(modelpath,"valTF.bson") valDict
+@load string(modelpath,"valTF.bson") valDict
 
-constKeys = (ρ=1e-6,Δ=0.001,β₁=0.9,β₂=0.999,epochs=200,std=50.0,threshold=-Inf,prefilter=false,ltiType="DiagonalFilterCell",shuffle=true,batchsize=192*200)
+constKeys = (ρ=1e-6,Δ=0.001,β₁=0.9,β₂=0.999,epochs=200,std=50.0,threshold=-Inf,ltiType="DiagonalFilterCell",shuffle=true,batchsize=192*200)
 plotDict = filterDict(valDict,constKeys);
 
 ## Plot loss trajectories
-bestHP,_ = plotValLosses(plotDict,plotBest=false,
+metric = :ValLoss
+bestHP,plts = plotValLosses(plotDict,plotBest=false,
                         deltaEpochIndex=25,
                         hpName="Seed=",
-                        title="Static teacher forcing losses",
-                        metric=:ValLoss)
-# savefig(string(figurepath,"TF_losses.png"))
+                        title="Hodgkin-Huxley RMM teacher forcing losses",
+                        metric=metric)
+savefig(plts[2],string(figurepath,"TF_losses_"*string(metric)*".svg"))
 
 ## Choose hyperparameter
-hp=123
-bestVal_tf = plotDict[hp]
-net = bestVal_tf[:netValLoss]
+for (i,hp) in enumerate([123,321,456,654,789,987])
+    bestVal_tf = plotDict[hp]
+    net = bestVal_tf[Symbol("net"*string(metric))]
 
-## Plot voltage trajectories
-pltHHVoltages=plotVoltages(net,valdata;   overlay=false,
-                            plotPercent=(0.7,1.0),
-                            vticks=([-65,-0],[L"-65mV",L"0mV"]),
-                            Iticks=([-5,5],[L"-5μA",L"5μA"]),
-                            tticks=([2100,2600],[L"2s",L"2.5s"]),
-                            legend=false)
+    ## Plot voltage trajectories
+    pltHHVoltages=plotVoltages(net,valdata;   
+                                overlay=false,
+                                plotPercent=(0.7,1.0),
+                                vticks=[-65,-0],
+                                Iticks=[-5,5],
+                                tbar=0.1,
+                                IUnit="[μA]",
+                                legend=false,
+                                predictionColor=palette(:default)[i])
+    display(pltHHVoltages)
+    sleep(2)
+    ## Plot conductance trajectories
+    pltHHConductances=plotCurrents(net,valdata;
+                                gUnit="[μS]",
+                                overlay=true,
+                                vticks=[-65,-0],
+                                plotPercent=(0.915,0.935),
+                                plotConductances=true,
+                                trueData=true,
+                                linewidth=2.0,
+                                tbar=0.02,
+                                predictionColor=palette(:default)[i])
+    display(pltHHConductances)
+    sleep(2)
 
-## Plot conductance trajectories
-pltHHConductances=plotCurrents(net,valdata;
-                            overlay=true,
-                            currentTicks=(([0,40],[L"0 \mu S",L"40 \mu S"]),([0,12],[L"0 \mu S",L"12 \mu S"])),
-                            vticks=([-65,-0],[L"-65mV",L"0mV"]),
-                            plotPercent=(0.915,0.935),
-                            plotConductances=true,
-                            conductanceData=true,
-                            linewidth=2.0,
-                            tticks=([2100,2600],[L"2s",L"2.5s"]))
-
-## Save figures
-# savefig(pltHHVoltages,string(figurepath,"HH_voltages_seed",hp,".png"))
-# savefig(pltHHConductances,string(figurepath,"HH_conductances",hp,".png"))
+    ## Save figures
+    savefig(pltHHVoltages,string(figurepath,"HH_voltages_seed",hp,"_",string(metric),".svg"))
+    savefig(pltHHConductances,string(figurepath,"HH_conductances",hp,"_",string(metric),".svg"))
+end

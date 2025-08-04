@@ -58,6 +58,7 @@ end
 
 function regularizer(net::NetworkCell,fun::F) where F
     norm = sum(regularizer(net.ANN[i,j],fun) for i=1:net.size[1], j=1:net.size[2])
+    # norm += sum(l2norm(weight(net.Cinv[i])) for i=1:net.size[1])
     return norm
 end
 

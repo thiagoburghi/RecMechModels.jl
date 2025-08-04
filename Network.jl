@@ -218,6 +218,13 @@ end
 
 Flux.@layer :expand Network trainable=(cell,)
 
+function getInitTimeIndex(net::Network)    
+    λ = getLargestTimescale(net.cell)
+    k = log(λ,net.cell.transientPercent) # number of dt_model periods to dump
+    t₀ = ceil(Int,k)
+    return t₀
+end
+
 """ 
     Custom split layer
 """

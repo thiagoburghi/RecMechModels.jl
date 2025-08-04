@@ -112,9 +112,11 @@ function ActivationCurrentHP(xInds,xUnits,xLayerFun,xLayerTypes,g₀,E₀; σ=no
                                                                         actReadoutBias=false,
                                                                         actNormFunction=MinMaxNorm,
                                                                         actNormLims=nothing,
+                                                                        actRegWeight=1.0,
+                                                                        actOrthogonalize=false,
                                                                         regWeight=1.0)
     actMlpHP = MlpHP(length(xInds),xUnits,xLayerFun,xLayerTypes,actReadoutBias)
-    actHP = LumpedCurrentHP(xInds,actMlpHP,false,actNormFunction,nothing,actNormLims,1.0,false,1.0) 
+    actHP = LumpedCurrentHP(xInds,actMlpHP,false,actNormFunction,nothing,actNormLims,1.0,actOrthogonalize,actRegWeight) 
 
     return GatingCurrentHP(actHP,nothing,g₀,E₀,σ,trainCond,trainNernst,regNernst,maximalBias,regWeight,(true,false))
 end
@@ -127,9 +129,11 @@ function InactivationCurrentHP(xInds,xUnits,xLayerFun,xLayerTypes,g₀,E₀; σ=
                                                                         inactReadoutBias=false,
                                                                         inactNormFunction=MinMaxNorm,
                                                                         inactNormLims=nothing,
+                                                                        inactRegWeight=1.0,
+                                                                        inactOrthogonalize=false,
                                                                         regWeight=1.0)
     inactMlpHP = MlpHP(length(xInds),xUnits,xLayerFun,xLayerTypes,inactReadoutBias)
-    inactHP = LumpedCurrentHP(xInds,inactMlpHP,false,inactNormFunction,nothing,inactNormLims,1.0,false,1.0)
+    inactHP = LumpedCurrentHP(xInds,inactMlpHP,false,inactNormFunction,nothing,inactNormLims,1.0,inactOrthogonalize,inactRegWeight)
 
     return GatingCurrentHP(nothing,inactHP,g₀,E₀,σ,trainCond,trainNernst,regNernst,maximalBias,regWeight,(false,true))
 end

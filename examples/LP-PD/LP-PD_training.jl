@@ -75,7 +75,7 @@ loss_tf = Loss(l2norm,ρ₀_tf)
 # Validation
 snap_interval_tf = 5
 std=200
-valOpt = (prefilter=true,threshold=2.0,std=std,fc_low=1/50,fc_high=1/2)
+valOpt = (prefilter=(fc_low=1/50,fc_high=1/2,order=6),threshold=2.0,smooth=(kernelType=:gaussian,std=std))
 
 #######################################
 ## Teacher forcing training
@@ -113,7 +113,7 @@ end
 # Load models trained with teacher forcing and quickly check results
 @load string(modelpath,"valTF.bson") dict_tf
 dict_tf = filterDict(dict_tf,(ρ₀=ρ₀_tf,β₁=β₁_tf,β₂=β₂_tf,epochs=epochs_tf,batchsize=batchsize_tf));
-plotValLosses(dict_tf,title="")
+plotValLosses(dict_tf,title="",deltaEpochIndex=25,)
 
 ## Choose one dataset to improve with regards to teacher forcing
 filename="file1"
