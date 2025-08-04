@@ -1,12 +1,13 @@
-## Recurrent Mechanistic Models
-This repository contains the code used to produce the results in the preprint:
+## Recurrent Mechanistic Models (RMMs)
+The main branch of this repository contains the code used to produce the results in the paper:
 
   *"Rapid, interpretable, data-driven models of neural dynamics using Recurrent Mechanistic Models"*
+  Proceedings of the National Academy of Sciences of the U.S.A. 122 (32) e2426916122, 2025
   by Thiago B. Burghi, Maria Ivanova, Ekaterina Morozova, Huaxinyu Wang, Eve Marder, and Timothy O’Leary
   
-which can be found in https://www.biorxiv.org/content/10.1101/2024.10.10.617633v2
+which can be found in https://www.pnas.org/doi/10.1073/pnas.2426916122
 
-The main results of the preprint can be obtained by running the scripts found in the "examples" folder.
+The main results of the paper can be obtained by running the scripts found in the "examples" folder.
 Data used to obtain the results is available in the following repository:
 
 https://doi.org/10.17863/CAM.115630
