@@ -151,7 +151,7 @@ function localAdmittances(net::NetworkCell,V̄::AbstractVecOrMat,Ω::AbstractVec
     V̄ = Float32.(reshape(V̄,1,length(V̄)))
     X̄ = [DCgain(net.FB[i,j]).*V̄ for i=1:net.size[1], j=1:net.size[2]]
     Hjω = [[transferFunction(net.FB[i,j],Ω[k],net.dt) for i = 1:net.size[1], j = 1:net.size[2]] for k=1:length(Ω)]
-    ∂ψ = [[Flux.jacobian((v̄,x̄) -> ionicCurrents(net.ANN[i,j],v̄,x̄), [V̄[k];;], reshape(X̄[i,j][:,k],length(X̄[i,j][:,k]),1)) for i=1:net.size[1], j=1:net.size[2]] for k=1:length(V̄)]
+    ∂ψ = [[Flux.jacobian((v̄,x̄) -> net.ANN[i,j](v̄,x̄), [V̄[k];;], reshape(X̄[i,j][:,k],length(X̄[i,j][:,k]),1)) for i=1:net.size[1], j=1:net.size[2]] for k=1:length(V̄)]
     Y_v_w = [vcat([hcat([(∂ψ[k][i,j][2] * Hjω[l][i,j] + ∂ψ[k][i,j][1]) for k=1:length(V̄)]...) for l=1:length(Ω)]...) for i=1:net.size[1], j=1:net.size[2]]
     return Y_v_w
 end
